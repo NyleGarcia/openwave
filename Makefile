@@ -15,11 +15,12 @@ SITEPKG := $(shell $(PYTHON) -c "import site; print(site.getsitepackages()[0])")
 
 install:
 	install -dm755 $(DESTDIR)$(SITEPKG)/wavexlr
-	install -m644 wavexlr/__init__.py wavexlr/__main__.py wavexlr/app.py wavexlr/audio.py wavexlr/daemon.py wavexlr/device.py wavexlr/meter.py wavexlr/mixer.py wavexlr/mixmatrix.py wavexlr/service.py wavexlr/setup.py wavexlr/sourcedialog.py wavexlr/sources.py wavexlr/style.css wavexlr/tray.py $(DESTDIR)$(SITEPKG)/wavexlr/
+	install -m644 wavexlr/__init__.py wavexlr/__main__.py wavexlr/app.py wavexlr/audio.py wavexlr/daemon.py wavexlr/device.py wavexlr/meter.py wavexlr/mixer.py wavexlr/mixmatrix.py wavexlr/probe.py wavexlr/profiles.py wavexlr/service.py wavexlr/setup.py wavexlr/sourcedialog.py wavexlr/sources.py wavexlr/style.css wavexlr/tray.py $(DESTDIR)$(SITEPKG)/wavexlr/
 	install -dm755 $(BINDIR)
 	printf '#!/bin/sh\nexec %s -m wavexlr "$$@"\n' "$(PYTHON)" > $(BINDIR)/openwave
 	chmod 755 $(BINDIR)/openwave
 	install -Dm644 wavexlr.desktop $(DESKTOPDIR)/openwave.desktop
+	install -Dm644 openwave-autostart.desktop $(APPDIR)/openwave-autostart.desktop
 	install -Dm644 wireplumber/51-openwave-wave-xlr.conf $(APPDIR)/wireplumber/51-openwave-wave-xlr.conf
 	install -Dm644 pipewire/52-openwave-mixes.conf $(APPDIR)/pipewire/52-openwave-mixes.conf
 	install -Dm644 README.md $(DOCDIR)/README.md

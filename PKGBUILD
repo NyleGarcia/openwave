@@ -2,7 +2,7 @@
 pkgname=openwave
 pkgver=1.0.0
 pkgrel=1
-pkgdesc="Linux control application for the Elgato Wave XLR"
+pkgdesc="Linux control application for the Elgato Wave XLR and Wave:3"
 arch=('any')
 url="https://github.com/rikkichy/openwave"
 license=('MIT')
@@ -26,6 +26,9 @@ package() {
 
     # Desktop entry
     install -Dm644 wavexlr.desktop "$pkgdir/usr/share/applications/$pkgname.desktop"
+
+    # Autostart template (user copies to ~/.config/autostart)
+    install -Dm644 openwave-autostart.desktop "$pkgdir/usr/share/openwave/openwave-autostart.desktop"
 
     # License
     install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
