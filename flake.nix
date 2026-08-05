@@ -34,19 +34,26 @@
             ];
 
             dontBuild = true;
-
+            # The Makefile derives SITEPKG from the interpreter, which is
+            # a read-only store path here -- override it onto $out and
+            # point the generated launcher at the pygobject python.
             installFlags = [
               "PREFIX=${placeholder "out"}"
               "SITEPKG=${placeholder "out"}/${sitePkgs}"
               "PYTHON=${pythonEnv}/bin/python3"
             ];
 
+            # Declarative version of the rule wavexlr/setup.py writes on
+            # first run -- consume via services.udev.packages on NixOS
+            # and the in-app permission check passes out of the box.
             postInstall = ''
               mkdir -p $out/lib/udev/rules.d
               echo 'SUBSYSTEM=="usb", ATTR{idVendor}=="0fd9", ATTR{idProduct}=="007d", MODE="0666"' \
                 > $out/lib/udev/rules.d/99-openwave.rules
             '';
 
+            # ctypes needs to find libusb; the module tree needs to be on
+            # PYTHONPATH since it lives in $out, not inside the python env.
             dontWrapGApps = true;
             preFixup = ''
               wrapProgram $out/bin/openwave \
@@ -54,6 +61,8 @@
                 --prefix LD_LIBRARY_PATH : ${usbLibs} \
                 "''${gappsWrapperArgs[@]}"
 
+              # daemon entry point as a first-class binary, so a
+              # declarative user service is trivial if ever wanted
               makeWrapper ${pythonEnv}/bin/python3 $out/bin/openwave-daemon \
                 --add-flags "-m wavexlr.daemon" \
                 --prefix PYTHONPATH : $out/${sitePkgs} \
