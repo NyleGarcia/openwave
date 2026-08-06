@@ -18,15 +18,39 @@ start(), stop(), plus `backend_name` for diagnostics.
 
 import getpass
 import os
+import shlex
 import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
+
+from . import paths
 
 SYSTEMD_UNIT = "openwave.service"
 RUNIT_SERVICE = "wavexlr-audio"
 
 _APP_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _daemon_command():
+    """Command a service manager should run to start the audio daemon.
+
+    Prefer the launcher installed beside this package: it is the only form
+    guaranteed to carry the interpreter and import path this install was built
+    with. `shutil.which("python3")` was wrong twice over -- it can select an
+    interpreter that cannot import wavexlr at all, and when nothing is on PATH
+    the /usr/bin/python3 fallback names a file that need not exist, which fails
+    203/EXEC inside a unit where Restart= turns it into a silent loop.
+    """
+    for candidate in (paths.bin_file("openwave-daemon"),
+                      shutil.which("openwave-daemon")):
+        if candidate:
+            return candidate
+
+    # Running from a source checkout with nothing installed. sys.executable is
+    # at least the interpreter that imported us, so the import path matches.
+    return f"{shlex.quote(sys.executable)} -m wavexlr.daemon"
 
 
 class _Stub:
@@ -67,14 +91,13 @@ class _Systemd:
     def install(self):
         service_dir = os.path.expanduser("~/.config/systemd/user")
         os.makedirs(service_dir, exist_ok=True)
-        python = shutil.which("python3") or "/usr/bin/python3"
         content = f"""[Unit]
 Description=OpenWave Audio Manager
 After=pipewire.service wireplumber.service
 
 [Service]
 Type=simple
-ExecStart={python} -c "from wavexlr.daemon import main; main()"
+ExecStart={_daemon_command()}
 WorkingDirectory={_APP_DIR}
 Restart=on-failure
 RestartSec=3
@@ -175,14 +198,13 @@ class _Runit:
 
     def install(self):
         user = getpass.getuser()
-        python = shutil.which("python3") or "/usr/bin/python3"
         script = f"""#!/bin/sh
 set -e
 mkdir -p /etc/sv/{RUNIT_SERVICE}/log /var/log/{RUNIT_SERVICE}
 cat > /etc/sv/{RUNIT_SERVICE}/run <<'RUN'
 #!/bin/sh
 exec 2>&1
-exec chpst -u {user} {python} -c "from wavexlr.daemon import main; main()"
+exec chpst -u {user} {_daemon_command()}
 RUN
 cat > /etc/sv/{RUNIT_SERVICE}/log/run <<'LOG'
 #!/bin/sh

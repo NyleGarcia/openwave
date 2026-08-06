@@ -3,7 +3,7 @@
 import os
 import subprocess
 
-from . import service
+from . import paths, service
 
 UDEV_RULES = (
     'SUBSYSTEM=="usb", ATTR{idVendor}=="0fd9", ATTR{idProduct}=="007d", MODE="0666"',  # Wave XLR
@@ -12,24 +12,23 @@ UDEV_RULES = (
 UDEV_PATH = "/etc/udev/rules.d/99-openwave.rules"
 UDEV_PATH_OLD = "/etc/udev/rules.d/99-wavexlr.rules"
 
-_APP_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-WIREPLUMBER_SOURCES = (
-    os.path.join(_APP_DIR, "wireplumber", "51-openwave-wave-xlr.conf"),
-    "/usr/local/share/openwave/wireplumber/51-openwave-wave-xlr.conf",
-    "/usr/share/openwave/wireplumber/51-openwave-wave-xlr.conf",
-)
+WIREPLUMBER_NAME = "51-openwave-wave-xlr.conf"
 WIREPLUMBER_PATH = os.path.expanduser(
-    "~/.config/wireplumber/wireplumber.conf.d/51-openwave-wave-xlr.conf"
+    "~/.config/wireplumber/wireplumber.conf.d/" + WIREPLUMBER_NAME
 )
 
-MIXES_SOURCES = (
-    os.path.join(_APP_DIR, "pipewire", "52-openwave-mixes.conf"),
-    "/usr/local/share/openwave/pipewire/52-openwave-mixes.conf",
-    "/usr/share/openwave/pipewire/52-openwave-mixes.conf",
-)
+MIXES_NAME = "52-openwave-mixes.conf"
 MIXES_PATH = os.path.expanduser(
-    "~/.config/pipewire/pipewire.conf.d/52-openwave-mixes.conf"
+    "~/.config/pipewire/pipewire.conf.d/" + MIXES_NAME
 )
+
+
+def wireplumber_source():
+    return paths.data_file("wireplumber", WIREPLUMBER_NAME)
+
+
+def mixes_source():
+    return paths.data_file("pipewire", MIXES_NAME)
 
 
 def udev_installed():
@@ -54,13 +53,14 @@ def wireplumber_installed():
             installed = f.read()
     except OSError:
         return False
-    for src in WIREPLUMBER_SOURCES:
-        try:
-            with open(src) as f:
-                return f.read() == installed
-        except OSError:
-            continue
-    return True
+    src = wireplumber_source()
+    if src is None:
+        return True
+    try:
+        with open(src) as f:
+            return f.read() == installed
+    except OSError:
+        return True
 
 
 def mixes_installed():
@@ -113,16 +113,14 @@ def install_service():
 
 def install_wireplumber():
     """Drop the suspend-disable rule into the user's WirePlumber config."""
-    for src in WIREPLUMBER_SOURCES:
-        if os.path.exists(src):
-            with open(src) as f:
-                content = f.read()
-            break
-    else:
+    src = wireplumber_source()
+    if src is None:
         raise FileNotFoundError(
-            "WirePlumber rule source not found. Looked in: "
-            + ", ".join(WIREPLUMBER_SOURCES)
+            f"WirePlumber rule source not found: share/openwave/wireplumber/"
+            f"{WIREPLUMBER_NAME} is missing from this install"
         )
+    with open(src) as f:
+        content = f.read()
     os.makedirs(os.path.dirname(WIREPLUMBER_PATH), exist_ok=True)
     with open(WIREPLUMBER_PATH, "w") as f:
         f.write(content)
@@ -175,16 +173,14 @@ def _create_mix_sink_live(name, description):
 
 def install_mixes():
     """Drop the three virtual mix sinks into the user's PipeWire config."""
-    for src in MIXES_SOURCES:
-        if os.path.exists(src):
-            with open(src) as f:
-                content = f.read()
-            break
-    else:
+    src = mixes_source()
+    if src is None:
         raise FileNotFoundError(
-            "Mix sinks config source not found. Looked in: "
-            + ", ".join(MIXES_SOURCES)
+            f"Mix sinks config source not found: share/openwave/pipewire/"
+            f"{MIXES_NAME} is missing from this install"
         )
+    with open(src) as f:
+        content = f.read()
     os.makedirs(os.path.dirname(MIXES_PATH), exist_ok=True)
     with open(MIXES_PATH, "w") as f:
         f.write(content)

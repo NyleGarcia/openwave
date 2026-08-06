@@ -15,7 +15,7 @@ from .meter import MeterMonitor
 from .mixer import Mixer
 from .mixmatrix import MixMatrix
 from .sourcedialog import AddSourceDialog
-from . import setup, service, sources as sources_module
+from . import paths, setup, service, sources as sources_module
 
 logging.basicConfig(level=logging.INFO, format="%(name)s: %(message)s")
 
@@ -679,12 +679,14 @@ class WaveXLRApp(Adw.Application):
 
     def _load_css(self):
         """Load OpenWave's stylesheet — alongside the .py files, or under share/."""
-        candidates = (
-            os.path.join(os.path.dirname(os.path.abspath(__file__)), "style.css"),
-            "/usr/local/share/openwave/style.css",
-            "/usr/share/openwave/style.css",
+        beside_module = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "style.css"
         )
-        css_path = next((p for p in candidates if os.path.exists(p)), None)
+        css_path = (
+            beside_module
+            if os.path.exists(beside_module)
+            else paths.data_file("style.css")
+        )
         if css_path is None:
             return
         provider = Gtk.CssProvider()
