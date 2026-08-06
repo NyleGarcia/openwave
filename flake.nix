@@ -46,9 +46,20 @@
             # Declarative version of the rule wavexlr/setup.py writes on
             # first run -- consume via services.udev.packages on NixOS
             # and the in-app permission check passes out of the box.
+            #
+            # Generated from setup.py's UDEV_RULES rather than restated, because
+            # udev_installed() requires *every* product ID to be present. This
+            # was hardcoded to 007d alone while UDEV_RULES also carries 0070
+            # (Wave:3), so the check failed permanently: run_setup() called
+            # install_udev() on every launch, pkexec-wrote the same file the
+            # package already owns, and returned early on failure -- meaning the
+            # WirePlumber and mix-sink configs after it never got installed
+            # either. On NixOS that pkexec cannot succeed regardless, since
+            # /etc/udev/rules.d/99-openwave.rules is a read-only store symlink.
             postInstall = ''
               mkdir -p $out/lib/udev/rules.d
-              echo 'SUBSYSTEM=="usb", ATTR{idVendor}=="0fd9", ATTR{idProduct}=="007d", MODE="0666"' \
+              ${pythonEnv}/bin/python3 -c 'import ast,sys; t=ast.parse(open(sys.argv[1]).read()); v=next(n.value for n in t.body if isinstance(n,ast.Assign) and any(getattr(x,"id",None)=="UDEV_RULES" for x in n.targets)); sys.stdout.write("\n".join(ast.literal_eval(v))+"\n")' \
+                "$out/${sitePkgs}/wavexlr/setup.py" \
                 > $out/lib/udev/rules.d/99-openwave.rules
             '';
 
