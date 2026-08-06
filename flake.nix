@@ -70,6 +70,26 @@
               # simply what PREFIX=/usr would have produced here.
               substituteInPlace "$out/${sitePkgs}/wavexlr/setup.py" \
                 --replace-fail /usr/share/openwave "$out/share/openwave"
+
+              # The desktop entry runs a bare `python3 -m wavexlr`, which only
+              # works if wavexlr is already importable. It is not: the module
+              # tree lives in $out and reaches the interpreter through the
+              # wrapper's PYTHONPATH. So launching from a menu silently does
+              # nothing while `openwave` in a shell works, because that is the
+              # wrapper. Point Exec at it.
+              substituteInPlace $out/share/applications/openwave.desktop \
+                --replace-fail "python3 -m wavexlr" "$out/bin/openwave"
+
+              # service.py builds ExecStart from shutil.which("python3"), and
+              # the wrapper exports PYTHONPATH but never puts an interpreter on
+              # PATH -- so which() finds nothing and the unit falls back to
+              # /usr/bin/python3, which does not exist here. The service then
+              # fails 203/EXEC and Restart=on-failure hides it in a loop, so the
+              # app reports "Audio service not running" with no obvious cause.
+              # $out/bin/openwave-daemon is the same entrypoint, already wrapped.
+              substituteInPlace "$out/${sitePkgs}/wavexlr/service.py" \
+                --replace-fail '{python} -c "from wavexlr.daemon import main; main()"' \
+                               "$out/bin/openwave-daemon"
             '';
 
             # ctypes needs to find libusb; the module tree needs to be on
