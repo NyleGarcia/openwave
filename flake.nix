@@ -61,6 +61,15 @@
               ${pythonEnv}/bin/python3 -c 'import ast,sys; t=ast.parse(open(sys.argv[1]).read()); v=next(n.value for n in t.body if isinstance(n,ast.Assign) and any(getattr(x,"id",None)=="UDEV_RULES" for x in n.targets)); sys.stdout.write("\n".join(ast.literal_eval(v))+"\n")' \
                 "$out/${sitePkgs}/wavexlr/setup.py" \
                 > $out/lib/udev/rules.d/99-openwave.rules
+
+              # setup.py looks for the WirePlumber and mix-sink configs next to
+              # the source tree, then under /usr/local and /usr. The Makefile put
+              # them in $out/share/openwave, so on Nix all three candidates miss
+              # and run_setup() dies with "WirePlumber rule source not found".
+              # Retarget the FHS prefix at the real one; $out/share/openwave is
+              # simply what PREFIX=/usr would have produced here.
+              substituteInPlace "$out/${sitePkgs}/wavexlr/setup.py" \
+                --replace-fail /usr/share/openwave "$out/share/openwave"
             '';
 
             # ctypes needs to find libusb; the module tree needs to be on
