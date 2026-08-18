@@ -47,6 +47,16 @@ def service_installed():
     return service.is_installed()
 
 
+def service_needs_refresh():
+    """Whether an installed service still starts the daemon this install ships.
+
+    Separate from service_installed() so run_uninstall() keeps removing a unit
+    that has gone stale, which a stricter service_installed() would make it
+    walk past and leave enabled.
+    """
+    return service.needs_refresh()
+
+
 def wireplumber_installed():
     try:
         with open(WIREPLUMBER_PATH) as f:
@@ -71,6 +81,7 @@ def needs_setup():
     return (
         not udev_installed()
         or not service_installed()
+        or service_needs_refresh()
         or not wireplumber_installed()
         or not mixes_installed()
     )
@@ -225,6 +236,12 @@ def run_setup():
             messages.append("Audio service installed and started")
         except Exception as e:
             return False, f"Failed to install service: {e}"
+    elif service_needs_refresh():
+        try:
+            install_service()
+            messages.append("Audio service updated for this install")
+        except Exception as e:
+            return False, f"Failed to update service: {e}"
 
     return True, ". ".join(messages) if messages else "Already configured"
 

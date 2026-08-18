@@ -287,7 +287,16 @@ class WaveXLRWindow(Adw.ApplicationWindow):
             self.uninstall_btn.set_visible(True)
         else:
             self.audio_status_icon.set_from_icon_name("dialog-warning-symbolic")
-            self.audio_status_row.set_subtitle("Audio service not running")
+            # Distinguish a service that never came up from one that is not
+            # installed at all: both leave the capture fix off, but only the
+            # first has anything to read in `journalctl --user -u openwave`.
+            if service.is_failed():
+                subtitle = "Audio service failed to start"
+            elif service.is_installed():
+                subtitle = "Audio service installed but not running"
+            else:
+                subtitle = "Audio service not running"
+            self.audio_status_row.set_subtitle(subtitle)
             self.uninstall_btn.set_visible(False)
 
     def _on_uninstall_clicked(self, btn):

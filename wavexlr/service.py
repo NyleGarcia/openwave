@@ -12,12 +12,14 @@ Selection rule, in order:
     2. runit    if /var/service is a directory and `sv` is on PATH
     3. stub     otherwise
 
-Exposed at module scope: is_running(), is_installed(), install(), uninstall(),
-start(), stop(), plus `backend_name` for diagnostics.
+Exposed at module scope: is_running(), is_installed(), is_failed(),
+needs_refresh(), install(), uninstall(), start(), stop(), plus `backend_name`
+for diagnostics.
 """
 
 import getpass
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -32,6 +34,55 @@ RUNIT_SERVICE = "wavexlr-audio"
 
 _APP_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
+# Prefixes holding content-addressed builds, which are never updated in place.
+# A path under one of these names one exact build of one exact version, so an
+# upgrade does not change it -- it strands it, and the collector deletes it.
+_IMMUTABLE_STORES = ("/nix/store/", "/gnu/store/")
+
+# Stable indirections into those stores, in PATH precedence order. Each is a
+# symlink the package manager repoints as part of an upgrade, so a path
+# through one names whichever build is current rather than a fixed one.
+_DURABLE_BINDIRS = (
+    "~/.nix-profile/bin",
+    "~/.local/state/nix/profile/bin",
+    "/etc/profiles/per-user/{user}/bin",
+    "/run/current-system/sw/bin",
+)
+
+
+def _durable_bin(path, name):
+    """Rewrite a store path to an equivalent that survives an upgrade.
+
+    A unit naming a store path directly is correct until exactly the next
+    upgrade: the new build lands on a new path, the old one is collected, and
+    ExecStart points at a file that is gone. That surfaces as 203/EXEC on a
+    RestartSec= timer -- a loop nothing reports, since `is-enabled` still says
+    enabled and the service was last seen working.
+
+    Going through a profile symlink means the service can lag the GUI by one
+    build when a checkout runs against an installed package. That is the right
+    way round: the alternative is a service that stops existing.
+    """
+    if not path.startswith(_IMMUTABLE_STORES):
+        return path
+    user = getpass.getuser()
+    for bindir in _DURABLE_BINDIRS:
+        candidate = os.path.join(
+            os.path.expanduser(bindir.format(user=user)), name
+        )
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return path
+
+
+def _daemon_launcher():
+    """The installed openwave-daemon launcher, or None if there is not one."""
+    for candidate in (paths.bin_file("openwave-daemon"),
+                      shutil.which("openwave-daemon")):
+        if candidate:
+            return _durable_bin(candidate, "openwave-daemon")
+    return None
+
 
 def _daemon_command():
     """Command a service manager should run to start the audio daemon.
@@ -43,14 +94,40 @@ def _daemon_command():
     the /usr/bin/python3 fallback names a file that need not exist, which fails
     203/EXEC inside a unit where Restart= turns it into a silent loop.
     """
-    for candidate in (paths.bin_file("openwave-daemon"),
-                      shutil.which("openwave-daemon")):
-        if candidate:
-            return candidate
+    launcher = _daemon_launcher()
+    if launcher:
+        return launcher
 
     # Running from a source checkout with nothing installed. sys.executable is
     # at least the interpreter that imported us, so the import path matches.
     return f"{shlex.quote(sys.executable)} -m wavexlr.daemon"
+
+
+def _daemon_workdir():
+    """Directory the daemon command has to run in, or None if it does not care.
+
+    Only the source-checkout fallback needs one, to resolve `-m wavexlr.daemon`
+    against the tree it was launched from. An installed launcher carries its
+    own import path, and a WorkingDirectory= it does not need is one more path
+    that can go stale underneath it -- a directory that has stopped existing
+    fails a unit the same 203/EXEC way a missing ExecStart does.
+    """
+    return None if _daemon_launcher() else _APP_DIR
+
+
+def _program_exists(command):
+    """Whether the program a service's start command names is still present."""
+    try:
+        argv = shlex.split(command)
+    except ValueError:
+        return False
+    if not argv:
+        return False
+    # systemd allows "-", "@", "+", "!" and ":" as ExecStart prefixes.
+    program = argv[0].lstrip("-@+!:")
+    if os.path.isabs(program):
+        return os.path.isfile(program) and os.access(program, os.X_OK)
+    return shutil.which(program) is not None
 
 
 class _Stub:
@@ -59,6 +136,8 @@ class _Stub:
 
     def is_running(self): return False
     def is_installed(self): return False
+    def is_failed(self): return False
+    def needs_refresh(self): return False
     def install(self): raise RuntimeError(self._MSG)
     def uninstall(self): raise RuntimeError(self._MSG)
     def start(self): raise RuntimeError(self._MSG)
@@ -67,6 +146,8 @@ class _Stub:
 
 class _Systemd:
     name = "systemd"
+
+    _EXEC_RE = re.compile(r"^ExecStart=(.*)$", re.M)
 
     def _user(self, *args, check=False):
         return subprocess.run(
@@ -88,27 +169,77 @@ class _Systemd:
         r = self._user("is-enabled", SYSTEMD_UNIT)
         return r.stdout.strip() == "enabled"
 
+    def is_failed(self):
+        return self._user("is-failed", SYSTEMD_UNIT).stdout.strip() == "failed"
+
+    def unit_path(self):
+        return os.path.join(
+            os.path.expanduser("~/.config/systemd/user"), SYSTEMD_UNIT
+        )
+
+    def needs_refresh(self):
+        """Whether the installed unit still starts what this install ships.
+
+        `is_installed()` answers a narrower question -- systemd is willing to
+        report a unit enabled whatever its ExecStart names -- so on its own it
+        reads a unit that can never start as a feature in working order.
+        """
+        try:
+            with open(self.unit_path()) as f:
+                installed = f.read()
+        except OSError:
+            return False  # nothing to refresh; install() is the path for that
+
+        m = self._EXEC_RE.search(installed)
+        if m is None:
+            return True
+        recorded = m.group(1).strip()
+        return recorded != _daemon_command() or not _program_exists(recorded)
+
+    def _unit_text(self):
+        lines = [
+            "[Unit]",
+            "Description=OpenWave Audio Manager",
+            "After=pipewire.service wireplumber.service",
+            # A unit that cannot start retries on the RestartSec= timer with
+            # no limit of its own, which is a loop rather than a failure: it
+            # never reaches `failed`, where both systemctl and the GUI would
+            # show it. Five attempts inside a minute still rides out PipeWire
+            # coming up late.
+            "StartLimitIntervalSec=60",
+            "StartLimitBurst=5",
+            "",
+            "[Service]",
+            "Type=simple",
+            f"ExecStart={_daemon_command()}",
+        ]
+        workdir = _daemon_workdir()
+        if workdir:
+            lines.append(f"WorkingDirectory={workdir}")
+        lines += [
+            "Restart=on-failure",
+            "RestartSec=3",
+            "",
+            "[Install]",
+            "WantedBy=default.target",
+            "",
+        ]
+        return "\n".join(lines)
+
     def install(self):
         service_dir = os.path.expanduser("~/.config/systemd/user")
         os.makedirs(service_dir, exist_ok=True)
-        content = f"""[Unit]
-Description=OpenWave Audio Manager
-After=pipewire.service wireplumber.service
-
-[Service]
-Type=simple
-ExecStart={_daemon_command()}
-WorkingDirectory={_APP_DIR}
-Restart=on-failure
-RestartSec=3
-
-[Install]
-WantedBy=default.target
-"""
-        with open(os.path.join(service_dir, SYSTEMD_UNIT), "w") as f:
-            f.write(content)
+        with open(self.unit_path(), "w") as f:
+            f.write(self._unit_text())
         self._user("daemon-reload", check=True)
-        self._user("enable", "--now", SYSTEMD_UNIT, check=True)
+        self._user("enable", SYSTEMD_UNIT, check=True)
+        # Clears both a `failed` result and a start-rate lockout, neither of
+        # which `start` would get past. Restarting rather than starting is
+        # what makes this double as the repair path: an already-enabled unit
+        # left over from a previous install is running the old ExecStart, and
+        # `start` on it is a no-op.
+        self._user("reset-failed", SYSTEMD_UNIT)
+        self._user("restart", SYSTEMD_UNIT, check=True)
 
     def uninstall(self):
         self._user("stop", SYSTEMD_UNIT)
@@ -196,6 +327,20 @@ class _Runit:
     def is_installed(self):
         return self._LINK.exists()
 
+    def is_failed(self):
+        # runsv keeps restarting a service that exits; there is no terminal
+        # failed state to report.
+        return False
+
+    def needs_refresh(self):
+        """Whether the installed run script still starts what we ship now."""
+        run = Path("/etc/sv") / RUNIT_SERVICE / "run"
+        try:
+            script = run.read_text()
+        except OSError:
+            return False
+        return _daemon_command() not in script
+
     def install(self):
         user = getpass.getuser()
         script = f"""#!/bin/sh
@@ -258,6 +403,14 @@ def is_running():
 
 def is_installed():
     return _BACKEND.is_installed()
+
+
+def is_failed():
+    return _BACKEND.is_failed()
+
+
+def needs_refresh():
+    return _BACKEND.needs_refresh()
 
 
 def install():
