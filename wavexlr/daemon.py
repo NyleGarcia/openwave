@@ -14,9 +14,15 @@ log = logging.getLogger("openwave.daemon")
 def main():
     log.info("Starting OpenWave audio daemon")
 
-    def on_status(present, healthy):
+    def on_status(present, healthy, state):
         if not present:
             log.info("Device not detected")
+        elif state == "silent":
+            log.error(
+                "Capture stream is up but every sample is zero -- the device "
+                "is delivering digital silence. Power-cycle it; a USB "
+                "re-enumeration does not clear this state."
+            )
         elif healthy:
             log.info("Capture keepalive active")
         else:

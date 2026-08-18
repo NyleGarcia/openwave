@@ -18,6 +18,20 @@ This module watches the byte stream coming out of pw-cat. At 48 kHz mono
 s16, a healthy keepalive emits ~96 kB/s. If the byte counter doesn't
 advance for WEDGE_TIMEOUT seconds while pw-cat is supposedly running,
 we recycle it to release the shared USB clock.
+
+Byte flow alone is not enough to call the keepalive healthy, because the
+device has a second failure mode that satisfies it: the stream stays up
+and every sample in it is zero. Nothing about that looks wrong from
+outside -- pw-cat runs, bytes arrive at the full 96 kB/s, the config
+block reads unmuted with gain set, and the device's own meter still
+moves -- so the mic is silent while everything reports working. We watch
+for a non-zero sample as well, which is what separates the two.
+
+Recycling does not clear the silent state; neither does a USB
+re-enumeration. Only a power cycle does. So silence is reported rather
+than retried: one recycle in case this instance of it is the recoverable
+kind, and after that the manager holds the stream and says what is
+wrong, instead of tearing it down every few seconds forever.
 """
 
 import json
@@ -46,6 +60,23 @@ WATCHDOG_INTERVAL = 1.0
 # enough that the watchdog notices the data flow promptly.
 DRAIN_CHUNK = 4096
 
+# Seconds of unbroken digital silence before the stream counts as dead.
+# A capturing microphone always carries a noise floor: measured against a
+# working Wave XLR in a quiet room with nobody speaking, ~91% of frames
+# hold a non-zero sample. Exact zeros for this long is a dead stream
+# rather than a quiet one.
+SILENCE_TIMEOUT = 30.0
+
+# How often to re-examine a stream already known to be silent, and how
+# long to cache the source's mute state. Neither answer changes fast.
+SILENCE_RECHECK = 5.0
+
+# Recycles to spend on a silent stream before treating it as something
+# that has to be reported instead. Silence has not been observed to
+# recover from a recycle, and retrying forever is how the no-data path
+# used to bury the fault it was reporting.
+MAX_SILENCE_RECYCLES = 1
+
 # Grace period after start before health-checking, so pw-cat has time
 # to attach, negotiate, and start emitting samples.
 STARTUP_GRACE = 1.0
@@ -68,6 +99,41 @@ def _pw_dump():
     except Exception:
         pass
     return []
+
+
+def _source_is_muted(node_name):
+    """Whether the Wave source is muted, making digital silence expected.
+
+    Mute sits on the device's input Route rather than on the node, so this
+    walks node -> device.id -> Route. Worth the extra lookup: a muted mic
+    is all zeros by definition, and reporting that as a broken stream
+    would turn the mute button into a fault light.
+    """
+    if not node_name:
+        return False
+    dump = _pw_dump()
+    device_id = None
+    for obj in dump:
+        if obj.get("type") != "PipeWire:Interface:Node":
+            continue
+        props = obj.get("info", {}).get("props", {})
+        if props.get("node.name") == node_name:
+            device_id = props.get("device.id")
+            break
+    if device_id is None:
+        return False
+    try:
+        device_id = int(device_id)
+    except (TypeError, ValueError):
+        return False
+    for obj in dump:
+        if obj.get("id") != device_id:
+            continue
+        routes = obj.get("info", {}).get("params", {}).get("Route") or []
+        for route in routes:
+            if route.get("direction") == "Input":
+                return bool(route.get("props", {}).get("mute"))
+    return False
 
 
 def _get_source_node_name():
@@ -95,13 +161,24 @@ class AudioManager:
         self._cat_proc = None
         self._reader_thread = None
         self._last_data_at = 0.0
+        self._last_signal_at = 0.0
+        self._source_name = None
+        self._silence_recycles = 0
+        self._muted = False
+        self._mute_checked_at = 0.0
         self._healthy = False
+        self._state = "absent"
         self._device_present = False
         self.on_status_change = on_status_change
 
     @property
     def healthy(self):
         return self._healthy
+
+    @property
+    def state(self):
+        """One of "ok", "wedged", "silent", "absent"."""
+        return self._state
 
     @property
     def device_present(self):
@@ -148,7 +225,10 @@ class AudioManager:
     def _start_cat(self, source_name):
         """Spawn pw-cat with stdout piped so we can monitor byte flow."""
         self._kill_cat()
-        self._last_data_at = time.monotonic()
+        now = time.monotonic()
+        self._last_data_at = now
+        self._last_signal_at = now
+        self._source_name = source_name
         self._cat_proc = subprocess.Popen(
             [
                 "pw-cat", "--record",
@@ -183,7 +263,12 @@ class AudioManager:
                 chunk = proc.stdout.read(DRAIN_CHUNK)
                 if not chunk:
                     return
-                self._last_data_at = time.monotonic()
+                now = time.monotonic()
+                self._last_data_at = now
+                # count(0) is a C-level scan; `any(chunk)` would be a
+                # Python loop over every byte of a 96 kB/s stream.
+                if chunk.count(0) != len(chunk):
+                    self._last_signal_at = now
         except Exception:
             return
         finally:
@@ -198,31 +283,77 @@ class AudioManager:
     def _data_flowing(self):
         return (time.monotonic() - self._last_data_at) < WEDGE_TIMEOUT
 
-    def _update_status(self, present, healthy):
-        changed = (present != self._device_present) or (healthy != self._healthy)
+    def _signal_flowing(self):
+        return (time.monotonic() - self._last_signal_at) < SILENCE_TIMEOUT
+
+    def _source_muted(self):
+        """Cached mute state; pw-dump is too heavy for every watchdog tick."""
+        now = time.monotonic()
+        if now - self._mute_checked_at < SILENCE_RECHECK:
+            return self._muted
+        self._mute_checked_at = now
+        self._muted = _source_is_muted(self._source_name)
+        return self._muted
+
+    def _update_status(self, present, healthy, state):
+        changed = (
+            present != self._device_present
+            or healthy != self._healthy
+            or state != self._state
+        )
         self._device_present = present
         self._healthy = healthy
+        self._state = state
         if changed and self.on_status_change:
-            self.on_status_change(present, healthy)
+            self.on_status_change(present, healthy, state)
 
     def _run(self):
         while self._running:
             try:
                 if self._cat_alive():
-                    if self._data_flowing():
-                        self._update_status(True, True)
+                    if not self._data_flowing():
+                        stalled_for = time.monotonic() - self._last_data_at
+                        log.warning(
+                            f"Capture keepalive wedged ({stalled_for:.1f}s "
+                            "without data); recycling to release the shared "
+                            "USB clock"
+                        )
+                        self._kill_cat()
+                        self._update_status(True, False, "wedged")
+                        # Brief settle so PipeWire fully releases the device
+                        # before the new pw-cat reattaches.
+                        time.sleep(0.5)
+                        continue
+
+                    if self._signal_flowing():
+                        self._silence_recycles = 0
+                        self._update_status(True, True, "ok")
                         time.sleep(WATCHDOG_INTERVAL)
                         continue
-                    stalled_for = time.monotonic() - self._last_data_at
-                    log.warning(
-                        f"Capture keepalive wedged ({stalled_for:.1f}s without "
-                        "data); recycling to release the shared USB clock"
-                    )
-                    self._kill_cat()
-                    self._update_status(True, False)
-                    # Brief settle so PipeWire fully releases the device
-                    # before the new pw-cat reattaches.
-                    time.sleep(0.5)
+
+                    if self._source_muted():
+                        # Zeros are the correct output for a muted mic.
+                        # Move the clock along so an unmute is what starts
+                        # the silence window, not the mute that preceded it.
+                        self._last_signal_at = time.monotonic()
+                        self._update_status(True, True, "ok")
+                        time.sleep(WATCHDOG_INTERVAL)
+                        continue
+
+                    silent_for = time.monotonic() - self._last_signal_at
+                    if self._silence_recycles < MAX_SILENCE_RECYCLES:
+                        self._silence_recycles += 1
+                        log.warning(
+                            f"Capture stream silent ({silent_for:.0f}s of zero "
+                            "samples while unmuted); recycling once"
+                        )
+                        self._kill_cat()
+                        self._update_status(True, False, "silent")
+                        time.sleep(0.5)
+                        continue
+
+                    self._update_status(True, False, "silent")
+                    time.sleep(SILENCE_RECHECK)
                     continue
 
                 if self._cat_proc is not None:
@@ -234,15 +365,16 @@ class AudioManager:
 
                 source_name = _get_source_node_name()
                 if not source_name:
-                    self._update_status(False, False)
+                    self._update_status(False, False, "absent")
                     time.sleep(5)
                     continue
 
                 self._start_cat(source_name)
                 time.sleep(STARTUP_GRACE)
-                self._update_status(True, self._cat_alive() and self._data_flowing())
+                started = self._cat_alive() and self._data_flowing()
+                self._update_status(True, started, "ok" if started else "wedged")
 
             except Exception as e:
                 log.error(f"Audio manager error: {e}")
-                self._update_status(self._device_present, False)
+                self._update_status(self._device_present, False, self._state)
                 time.sleep(2)
