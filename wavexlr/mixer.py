@@ -639,7 +639,7 @@ class Mixer:
 
     # ----- subprocess lifecycle -----
     def _spawn_loopback(self, key, capture_source_name, playback_target,
-                        node_name, detach=False):
+                        node_name, detach=False, playback_extra=""):
         """Spawn a pw-loopback and *manually* link the capture side to
         `capture_source_name`'s output ports. We disable autoconnect on capture
         because the session manager will otherwise hijack the loopback by
@@ -666,7 +666,8 @@ class Mixer:
                     f"node.autoconnect=false node.name={capture_node_name} "
                     "audio.channels=2 audio.position=[FL,FR]",
                     "--playback-props="
-                    f"target.object={playback_target} node.name={node_name} "
+                    + (f"target.object={playback_target} " if playback_target else "")
+                    + f"node.name={node_name} " + playback_extra +
                     "audio.channels=2 audio.position=[FL,FR]",
                 ],
                 stdout=subprocess.DEVNULL,
@@ -926,6 +927,7 @@ class Mixer:
     def _do_start(self):
         self._sweep_stale_loopbacks()
         self._sweep_orphan_source_sinks()
+        self._respawn_mix_sources()
         self._respawn_all_output_loopbacks()
         with self._lock:
             self._streams = {s["id"]: s for s in list_audio_streams()}
@@ -947,6 +949,51 @@ class Mixer:
         self._spawn_loopback(
             key, mix_sink, target, f"openwave_loop_out_{mix_id}", detach=True,
         )
+
+    def _mix_source_node(self, sink):
+        """<sink>_source -- the name the hand-written config used, so an
+        application that has already selected it keeps working."""
+        return f"{sink}_source"
+
+    def _respawn_mix_sources(self):
+        """Publish each mix as an ordinary capture source, and keep it linked.
+
+        A mix's monitor already carries its audio, but voice applications --
+        Discord among them -- filter monitor sources out of their input lists
+        entirely, so a mix cannot be selected there. A loopback whose playback
+        side declares media.class=Audio/Source presents the same audio as a
+        microphone, which every application lists.
+
+        The capture side is re-linked on every pass, not once at creation.
+        Installing mixes destroys and recreates their sinks, and the new sink
+        is a different node: a loopback pinned to the old one keeps running
+        against a dead link, so the source exists, is selectable, and is
+        silent. Nothing else repairs that, and nothing reports it.
+
+        priority.session is low so these never win the default-source election
+        and displace a real microphone.
+        """
+        with self._lock:
+            mixes = dict(self._mixes)
+        for mix_id, mix in mixes.items():
+            sink = mix.get("sink")
+            if not sink:
+                continue
+            key = ("mixsrc", mix_id)
+            node_name = self._mix_source_node(sink)
+            if key not in self._procs:
+                self._spawn_loopback(
+                    key, sink, None, node_name,
+                    playback_extra=(
+                        "media.class=Audio/Source priority.session=100 "
+                        f'node.description="OpenWave {mix.get("name", mix_id)}" '
+                    ),
+                )
+            else:
+                # Already running: re-assert the link in case its sink was
+                # replaced underneath it. pw-link is harmless when the link
+                # already exists.
+                self._link_capture(sink, f"{node_name}_cap", retries=1)
 
     def _respawn_all_output_loopbacks(self):
         """Retarget every mix, paying the sink-enumeration cost once."""
@@ -1017,7 +1064,10 @@ class Mixer:
     def _sweep_stale_loopbacks():
         try:
             subprocess.run(
-                ["pkill", "-f", "pw-loopback.*openwave_loop_"],
+                # Broader than openwave_loop_: mix capture sources are named
+                # after their sink, so a narrower pattern would leak one per
+                # unclean exit.
+                ["pkill", "-f", "pw-loopback.*openwave_"],
                 capture_output=True, timeout=2,
             )
         except (FileNotFoundError, subprocess.SubprocessError):
@@ -1045,6 +1095,8 @@ class Mixer:
 
     def _reconcile_all(self):
         self._reap_dead()
+        if self._started:
+            self._respawn_mix_sources()
         # Snapshot both axes under the lock: set_sources/set_mixes replace
         # these dicts from the GTK thread, and a mutation mid-iteration would
         # raise into _worker_loop's bare except, silently leaving a mix

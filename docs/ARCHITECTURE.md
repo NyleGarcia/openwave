@@ -108,6 +108,20 @@ Output loopbacks are spawned **detached** — no `PR_SET_PDEATHSIG`, their own
 session — so closing the window does not silence the machine. Cell loopbacks
 are not: they are mixing state, and are rebuilt on the next start.
 
+## Mixes as capture sources
+
+Every mix is also published as an ordinary capture source, `<sink>_source`, so
+a mix can be selected as a microphone in a voice application. Its monitor
+already carries the same audio, but Discord and others filter monitor sources
+out of their input lists entirely, so a mix chosen that way is unselectable.
+
+The capture side is re-linked on every reconcile rather than once at creation.
+Installing mixes destroys and recreates their sinks, and the new sink is a
+different node: a loopback pinned to the old one keeps running against a dead
+link, so the source still exists, is still selectable, and is silent. Nothing
+else repairs that and nothing reports it, which is exactly the kind of failure
+that looks like "Discord cannot hear me" and has no visible cause.
+
 ## Where state lives
 
 | File | Written by | Holds |
@@ -139,6 +153,7 @@ restarts.
 | `openwave_loop_dev_<source>_to_<mix>` | a capture-device cell |
 | `openwave_loop_mic_to_<mix>` | the built-in microphone row |
 | `openwave_loop_out_<mix>` | a mix's output, detached |
+| `openwave_<mix>_mix_source` | a mix published as a capture source |
 
-Every loopback keeps the `openwave_loop_` prefix, because startup sweeps
-orphans by matching it.
+Startup sweeps orphaned loopbacks by matching `openwave_`, which covers both
+the `openwave_loop_` cells and the mix capture sources named after their sink.

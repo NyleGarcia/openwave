@@ -150,6 +150,14 @@ class SinkNaming(unittest.TestCase):
         self.assertEqual(mixer_mod.source_sink_name("music"),
                          "openwave_src_music")
 
+    def test_mix_source_keeps_the_published_node_name(self):
+        # An application that has already selected this source stores it by
+        # name, so changing the pattern silently re-points nothing and the
+        # user's microphone selection goes dead.
+        mx = bare_mixer()
+        self.assertEqual(mx._mix_source_node("openwave_chat_mix"),
+                         "openwave_chat_mix_source")
+
     def test_output_loopback_keys_are_recognised(self):
         # stop() and the atexit handler skip these so a mix keeps playing.
         self.assertTrue(mixer_mod._is_output_key(("output", "personal")))
