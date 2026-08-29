@@ -35,3 +35,6 @@
 .openwave-mix-cell:disabled {
     opacity: 0.55;
 }
+.openwave-source-waiting {
+    opacity: 0.55;
+}

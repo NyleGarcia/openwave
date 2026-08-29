@@ -298,6 +298,103 @@ def list_audio_streams():
         })
     return out
 
+# ----- application matching -------------------------------------------------
+# One definition of "does this stream belong to this source", shared by the
+# routing path (Mixer._reconcile_app_cell) and the metering path
+# (app._refresh_app_meter). The comparison used to be written out at both
+# sites; if they drift, a row shows a dead level bar while audio is routing,
+# or a moving one while nothing is.
+
+
+def _normalize(value):
+    """Case-folded, whitespace-collapsed form used for every name comparison."""
+    return " ".join(str(value or "").split()).casefold()
+
+
+def _stream_identities(stream):
+    """The names a stream may legitimately be known by, most specific first.
+
+    application.name comes first because it is what the add-source picker
+    offers. node.name and the process binary follow because a hand-typed name
+    rarely reproduces application.name byte for byte: Discord's stream is
+    application.name "WEBRTC VoiceEngine" with binary "Discord", plenty of apps
+    set no application.name at all (list_audio_streams already falls back to
+    node.name), and application.process.binary is sometimes an absolute path,
+    hence the basename entry.
+
+    Every comparison against these is EXACT equality, never substring or
+    prefix. "Chrome" as a substring also matches "Chromium", "Chrome Remote
+    Desktop" and "chrome_crashpad_handler", which would silently route another
+    process's audio into a live mix that may be feeding OBS or Discord. Case
+    and whitespace are the only tolerances.
+    """
+    binary = str(stream.get("binary") or "")
+    return (
+        _normalize(stream.get("app_name")),
+        _normalize(stream.get("node_name")),
+        _normalize(binary),
+        _normalize(os.path.basename(binary)),
+    )
+
+
+def _match_rank(source, stream, identities=None):
+    """Index of the identity `source` matches on, or None if it matches none.
+
+    The index doubles as a specificity score for claim_streams' tie-break.
+    `identities` may be passed in so a caller checking many sources against one
+    stream normalizes that stream once.
+    """
+    want = _normalize(source.get("match_app_name"))
+    if not want:
+        return None
+    if identities is None:
+        identities = _stream_identities(stream)
+    for rank, identity in enumerate(identities):
+        if identity and identity == want:
+            return rank
+    return None
+
+
+def stream_matches(source, stream):
+    """True if `stream` is one of the streams `source` is bound to."""
+    return _match_rank(source, stream) is not None
+
+
+def claim_streams(sources, streams):
+    """Assign each stream to at most one source. {source_id: {stream_id, ...}}.
+
+    Matching alone is not safe to route by. Two sources can match one stream:
+    trivially two sources bound to the same application, and now also a source
+    bound to application.name "Chromium" beside one bound to the binary
+    "chromium". Both would be routed into the same mix as separate loopbacks —
+    distinct keys, distinct node names, so nothing errors — and PipeWire sums
+    them at the sink. Two sample-aligned copies of one stream is 2x amplitude,
+    +6.02 dB, and since each source's fader is pushed onto its own loopback it
+    attenuates only its own copy: pulling one source to zero leaves the app
+    audible 6 dB down, which reads as a broken fader.
+
+    Giving every stream exactly one owner removes that by construction, in the
+    one place that decides what gets spawned, so a hand-edited sources.json
+    cannot bypass it. Ownership is deterministic — most specific match wins,
+    ties broken on source id — so it cannot flip between polls and thrash the
+    loopbacks. Sources that match nothing get an empty set, never a KeyError.
+    """
+    claims = {source_id: set() for source_id in sources}
+    for stream_id, stream in streams.items():
+        identities = _stream_identities(stream)
+        best_key = None
+        best_id = None
+        for source_id, source in sources.items():
+            rank = _match_rank(source, stream, identities)
+            if rank is None:
+                continue
+            key = (rank, str(source_id))
+            if best_key is None or key < best_key:
+                best_key, best_id = key, source_id
+        if best_id is not None:
+            claims[best_id].add(stream_id)
+    return claims
+
 
 class Mixer:
     """Manages pw-loopback subprocesses for the matrix's mic row."""
@@ -931,16 +1028,22 @@ class Mixer:
             _wpctl("set-mute", node_id, "1" if muted else "0")
 
     def _reconcile_app_cell(self, source_id, mix_id, volume, muted):
-        source = self._sources.get(source_id)
-        if not source:
+        # Snapshot both dicts under the lock: remove_source mutates _sources in
+        # place from the GTK thread and claim_streams iterates it, so an
+        # unlocked iteration could raise into _worker_loop's bare except and
+        # leave this cell unwired. The lock is released before anything below —
+        # _spawn_loopback/_destroy_loopback must never be called holding it.
+        with self._lock:
+            sources = dict(self._sources)
+            streams = dict(self._streams)
+        if source_id not in sources:
             return
         mix_sink = self._mix_sink(mix_id)
         if not mix_sink:
             return
-        match = source.get("match_app_name")
-        matching_stream_ids = {
-            sid for sid, s in self._streams.items() if s.get("app_name") == match
-        }
+        # One owner per stream: see claim_streams for why bare matching would
+        # route a shared stream into this mix twice, at roughly +6 dB.
+        matching_stream_ids = claim_streams(sources, streams).get(source_id, set())
         existing_keys = {
             k for k in self._procs
             if len(k) == 3 and k[0] == source_id and k[1] == mix_id
@@ -958,7 +1061,7 @@ class Mixer:
         for stream_id in matching_stream_ids:
             key = (source_id, mix_id, stream_id)
             node_name = f"openwave_loop_{source_id}_{mix_id}_{stream_id}"
-            stream_node_name = self._streams.get(stream_id, {}).get("node_name", "")
+            stream_node_name = streams.get(stream_id, {}).get("node_name", "")
             if not stream_node_name:
                 continue
             if key not in self._procs:

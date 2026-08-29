@@ -14,6 +14,7 @@ from .device import WaveDevice
 from .meter import MeterMonitor
 from .mixer import (
     Mixer, list_output_sinks, default_sink_name, OUTPUT_AUTO, OUTPUT_NONE,
+    claim_streams, stream_matches,
 )
 from .mixdialog import MixDialog
 from .mixmatrix import MixMatrix
@@ -790,23 +791,40 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         self._meter_targets[source_id] = node_name
 
     def _refresh_app_meter(self, source_id):
-        """Re-point the meter at the first currently-matching stream, or stop it
-        if none match. Called on stream-poll changes and source add."""
+        """Re-point the meter at the stream the mixer actually routes for this
+        source, and reflect whether the bound application is playing at all.
+        Called on stream-poll changes and source add."""
         source = self._sources.get(source_id)
         if not source:
             return
-        match = source.get("match_app_name")
         streams = self.mixer.streams()
+        # The same claim function the mixer routes by, so the meter can never
+        # end up watching a stream a different source owns.
+        claimed = claim_streams(self._sources, streams).get(source_id, set())
         candidate = next(
-            (s for s in streams.values() if s.get("app_name") == match), None,
+            (s for sid, s in streams.items() if sid in claimed), None,
         )
         current = self._meter_targets.get(source_id)
         if candidate is None:
+            # Waiting is set before the early return below: on the steady idle
+            # path the meter is already stopped, so a set_waiting placed after
+            # that return would fire once and never again.
+            if any(stream_matches(source, s) for s in streams.values()):
+                # The app is playing, but another source claimed the stream
+                # first — see mixer.claim_streams for why only one may have it.
+                hint = "Routed by another source"
+            else:
+                hint = "Waiting for audio"
+            self._set_source_waiting(source_id, True, hint)
             if current is not None:
                 self.meter.stop(source_id)
                 self._meter_targets.pop(source_id, None)
                 self._set_source_level(source_id, 0.0)
             return
+        # Likewise before the `already metering` return, which is the steady
+        # state for a running app and would otherwise leave the row dimmed
+        # forever after the first tick that found it.
+        self._set_source_waiting(source_id, False)
         if current == candidate["id"]:
             return  # already metering this stream
         self.meter.start(
@@ -814,6 +832,11 @@ class WaveXLRWindow(Adw.ApplicationWindow):
             lambda level, sid=source_id: self._set_source_level(sid, level),
         )
         self._meter_targets[source_id] = candidate["id"]
+
+    def _set_source_waiting(self, source_id, waiting, hint="Waiting for audio"):
+        cell = self.matrix.source(source_id)
+        if cell is not None:
+            cell.set_waiting(waiting, hint)
 
     def _set_source_level(self, source_id, level):
         cell = self.matrix.source(source_id)

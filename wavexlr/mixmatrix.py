@@ -481,9 +481,28 @@ class SourceCell(Gtk.Box):
         icon.set_pixel_size(26)
         inner.append(icon)
 
+        text = Gtk.Box(
+            orientation=Gtk.Orientation.VERTICAL,
+            spacing=0,
+            hexpand=True,
+            valign=Gtk.Align.CENTER,
+        )
+        inner.append(text)
+
         self._name_lbl = Gtk.Label(label=name, xalign=0, hexpand=True, ellipsize=3)
         self._name_lbl.add_css_class("heading")
-        inner.append(self._name_lbl)
+        text.append(self._name_lbl)
+
+        # Second line, kept out of the layout until the bound application stops
+        # playing, so a running source looks exactly as it did before this
+        # existed. The name column is narrow, hence the ellipsize + tooltip.
+        self._status_lbl = Gtk.Label(label="", xalign=0, ellipsize=3, visible=False)
+        self._status_lbl.add_css_class("dim-label")
+        self._status_lbl.add_css_class("caption")
+        text.append(self._status_lbl)
+
+        # None, not False: the first set_waiting call must always apply.
+        self._waiting = None
 
         self._mute_btn = Gtk.ToggleButton(valign=Gtk.Align.CENTER)
         self._mute_btn.add_css_class("flat")
@@ -560,6 +579,28 @@ class SourceCell(Gtk.Box):
         """Update the audio activity meter (0.0–1.0). No-op if not enabled."""
         if self._level is not None:
             self._level.set_value(max(0.0, min(1.0, value)))
+    def set_waiting(self, waiting, hint="Waiting for audio"):
+        """Show or clear the 'bound application is not playing' state.
+
+        A bound-but-idle source should read as waiting, not broken: the row
+        dims and gains a hint line, but stays interactive so levels can be set
+        up before the application is launched.
+
+        Called on every stream-poll tick, so it no-ops unless something
+        actually changed rather than churning the layout twice a second.
+        """
+        waiting = bool(waiting)
+        state = (waiting, hint if waiting else "")
+        if state == self._waiting:
+            return
+        self._waiting = state
+        self._status_lbl.set_label(hint if waiting else "")
+        self._status_lbl.set_visible(waiting)
+        self.set_tooltip_text(hint if waiting else None)
+        if waiting:
+            self.add_css_class("openwave-source-waiting")
+        else:
+            self.remove_css_class("openwave-source-waiting")
 
     def set_muted(self, muted):
         """Update the mute toggle without firing its signal."""
