@@ -69,7 +69,11 @@ WAVE_XLR = DeviceProfile(
     devinfo_serial=(27, 47),
     off_gain=0,
     gain_max=0x5000,
-    gain_scale=None,
+    # 256 raw units per dB, so gain_max is 80 dB. Measured against the ALSA
+    # 'Mic Capture Volume' control on a Wave XLR MK.2 at four points across
+    # the range (20/40/60/75 dB): 0x1400/0x2800/0x3C00/0x4B00, exactly 256.00
+    # raw per dB at every point.
+    gain_scale=256,
     off_mute=4,
     off_hp_vol=9,
     hp_fmt='<h',

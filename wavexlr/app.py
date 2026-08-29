@@ -180,7 +180,7 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         mic_group.add(mute_row)
 
         gain_row = Adw.ActionRow(title="Gain")
-        self.gain_label = Gtk.Label(label="0x0000", width_chars=8, xalign=1)
+        self.gain_label = Gtk.Label(label="—", width_chars=8, xalign=1)
         self.gain_label.add_css_class("monospace")
         gain_row.add_suffix(self.gain_label)
         mic_group.add(gain_row)
