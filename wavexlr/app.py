@@ -83,6 +83,7 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         self.meter = MeterMonitor()
         self._meter_targets = {}
         self._wire_matrix_cells()
+        self._refresh_mix_emptiness()
         self._start_meters()
         self._start_stream_poll()
         self._try_connect()
@@ -316,6 +317,17 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         self.serial_label.add_css_class("dim-label")
         self.serial_row.add_suffix(self.serial_label)
         info_expander.add_row(self.serial_row)
+
+    def _refresh_mix_emptiness(self):
+        """Mark every mix that no source currently feeds."""
+        cells = self.mixer.cells()
+        for mix_id in self._mixes:
+            fed = any(
+                state.get("volume", 0.0) > 0.0 and not state.get("muted")
+                for key, state in cells.items()
+                if key.rsplit(".", 1)[-1] == mix_id
+            )
+            self.matrix.set_mix_empty(mix_id, not fed)
 
     def _update_service_status(self):
         """Reflect the audio service in the header, and only when it matters.
@@ -609,6 +621,7 @@ class WaveXLRWindow(Adw.ApplicationWindow):
     def _on_mix_installed(self, _ok):
         self.mixer.set_mixes(self._mixes)
         self._refresh_outputs()
+        self._refresh_mix_emptiness()
 
     def _on_mix_install_failed(self, exc):
         """Register the mix anyway, and say that its sink is missing.
@@ -930,6 +943,7 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         self.mixer.set_sources(self._sources)
         self.mixer.poll_streams()
         self._refresh_source_meter(source["id"])
+        self._refresh_mix_emptiness()
 
     def _on_edit_source_clicked(self, _matrix, source_id):
         source = self._sources.get(source_id)
@@ -1019,11 +1033,13 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         self._cell_debounce_ids.pop((source_id, mix_id), None)
         cur = self.mixer.get_cell(source_id, mix_id)
         self.mixer.set_cell(source_id, mix_id, value, cur["muted"])
+        self._refresh_mix_emptiness()
         return False  # one-shot
 
     def _on_cell_mute_toggled(self, _cell, muted, source_id, mix_id):
         cur = self.mixer.get_cell(source_id, mix_id)
         self.mixer.set_cell(source_id, mix_id, cur["volume"], muted)
+        self._refresh_mix_emptiness()
 
 
 class WaveXLRApp(Adw.Application):

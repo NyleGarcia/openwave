@@ -136,6 +136,11 @@ class MixMatrix(Gtk.Box):
         for header in self._headers.values():
             header.set_delete_enabled(enabled, self.LAST_MIX_REASON)
 
+    def set_mix_empty(self, mix_id, empty):
+        header = self._headers.get(mix_id)
+        if header is not None:
+            header.set_empty(empty)
+
     def set_mix(self, mix_id, *, title=None, subtitle=None, icon_name=None):
         """Live-update a header's identity after a rename."""
         header = self._headers.get(mix_id)
@@ -410,6 +415,32 @@ class MixHeaderCell(Gtk.Box):
     def set_icon(self, icon_name):
         self._icon.set_from_icon_name(icon_name)
 
+    def set_empty(self, empty):
+        """Mark the column as carrying nothing.
+
+        A mix whose cells are all at zero is silent, and looks identical to a
+        working one: the sink exists, apps can select it, and it plays nothing.
+        Saying so here is the difference between "misconfigured" and "broken",
+        which is not otherwise visible anywhere.
+        """
+        if getattr(self, "_empty", None) == empty:
+            return
+        self._empty = empty
+        if empty:
+            self._out_lbl.set_label("No sources routed")
+            self._out_lbl.set_tooltip_text(
+                "Every source is at zero for this mix, so it carries no audio. "
+                "Raise a slider in this column."
+            )
+            self._out_icon.set_from_icon_name("dialog-information-symbolic")
+        else:
+            self._out_lbl.set_label(getattr(self, "_out_summary", ""))
+            self._out_lbl.set_tooltip_text(None)
+            self._out_icon.set_from_icon_name(
+                "audio-speakers-symbolic" if getattr(self, "_monitored", True)
+                else "audio-volume-muted-symbolic"
+            )
+
     def set_outputs(self, entries, current, summary, monitored=True):
         """Rebuild the chooser. `entries` is [(output name, label), ...]."""
         self._updating = True
@@ -439,12 +470,20 @@ class MixHeaderCell(Gtk.Box):
         finally:
             self._updating = False
 
+        self._monitored = monitored
+        self._out_summary = summary
         self._out_lbl.set_label(summary)
         self._out_lbl.set_tooltip_text(summary)
         self._out_icon.set_from_icon_name(
             "audio-speakers-symbolic" if monitored else "audio-volume-muted-symbolic"
         )
         self._out_box.set_visible(True)
+        if getattr(self, "_empty", False):
+            # Re-assert after the icon and label above, which would otherwise
+            # overwrite it: an empty column keeps saying so, because where it
+            # routes is moot until something feeds it.
+            self._empty = None
+            self.set_empty(True)
 
     def set_delete_enabled(self, enabled, reason=""):
         self._delete_btn.set_sensitive(enabled)

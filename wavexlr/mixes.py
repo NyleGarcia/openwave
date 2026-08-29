@@ -45,7 +45,7 @@ DEFAULT_MIXES = {
     "chat": {
         "id": "chat",
         "name": "Chat Mix",
-        "subtitle": "To voice apps (v0.3.0)",
+        "subtitle": "Send to voice apps",
         "description": "OpenWave Chat Mix",
         "sink": "openwave_chat_mix",
         "icon_name": "system-users-symbolic",
@@ -53,7 +53,7 @@ DEFAULT_MIXES = {
     "record": {
         "id": "record",
         "name": "Record Mix",
-        "subtitle": "To OBS / recording (v0.3.0)",
+        "subtitle": "Send to OBS or a recorder",
         "description": "OpenWave Record Mix",
         "sink": "openwave_record_mix",
         "icon_name": "media-record-symbolic",
@@ -89,6 +89,30 @@ def load():
     return data
 
 
+_STALE_SUBTITLES = {
+    "To voice apps (v0.3.0)": "Send to voice apps",
+    "To OBS / recording (v0.3.0)": "Send to OBS or a recorder",
+}
+
+
+def _clear_stale_subtitles(mixes):
+    """Replace subtitles promising a version that has since shipped.
+
+    The seeded text named an unreleased version as the reason a mix did
+    nothing. Those mixes work now, and the text is already persisted in every
+    existing mixdefs.json, so fixing the seed alone would leave it on screen
+    forever. Only the exact original strings are touched: anything the user has
+    since edited is theirs.
+    """
+    changed = False
+    for mix in mixes.values():
+        replacement = _STALE_SUBTITLES.get(mix.get("subtitle"))
+        if replacement is not None:
+            mix["subtitle"] = replacement
+            changed = True
+    return changed
+
+
 def load_seeded():
     """Load the store, creating it from DEFAULT_MIXES on first run.
 
@@ -106,6 +130,8 @@ def load_seeded():
         data = None
     if data is None:
         data = copy.deepcopy(DEFAULT_MIXES)
+        save(data)
+    elif _clear_stale_subtitles(data):
         save(data)
     return data
 

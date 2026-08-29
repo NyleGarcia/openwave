@@ -290,9 +290,16 @@ def list_audio_streams():
         if props.get("media.class") != "Stream/Output/Audio":
             continue
         app = props.get("application.name") or props.get("node.name") or "Unknown"
-        # Skip our own loopbacks
         node_name = props.get("node.name", "")
-        if node_name.startswith("openwave_"):
+        # Skip our own loopbacks, and anyone else's. A loopback's playback node
+        # is a Stream/Output like any other, so "playback.game_output" was
+        # offered in the Add Source picker as though it were an application --
+        # binding one captures whatever is routed through that channel rather
+        # than a program, which is never what the picker appears to promise.
+        if node_name.startswith("openwave_") or node_name.startswith("playback."):
+            continue
+        # A real application publishes a process binary; a virtual node does not.
+        if not props.get("application.process.binary") and "." in node_name:
             continue
         out.append({
             "id": obj["id"],
