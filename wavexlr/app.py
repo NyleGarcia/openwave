@@ -14,7 +14,7 @@ import threading
 from .device import WaveDevice
 from .meter import MeterMonitor
 from .mixer import (
-    Mixer, list_output_sinks, default_sink_name, OUTPUT_AUTO, OUTPUT_NONE,
+    Mixer, ELGATO_VID, list_capture_sources as _list_captures, list_output_sinks, default_sink_name, OUTPUT_AUTO, OUTPUT_NONE,
     claim_streams, stream_matches,
 )
 from .mixdialog import MixDialog
@@ -73,6 +73,8 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         # One-shot re-read of the routing after a mix output change settles.
         self._output_refresh_id = None
         self._sources = sources_module.load_seeded()
+        self._offered_nodes = set(
+            self._load_ui_state().get("offered_capture_nodes") or [])
         self._mixes = mixes_module.load_seeded()
 
         self._build_ui()
@@ -94,6 +96,9 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         self.meter = MeterMonitor()
         self._meter_targets = {}
         self._wire_matrix_cells()
+        self._drop_builtin_mic_row_if_absent()
+        self._name_builtin_mic_row()
+        self._autodiscover_elgato_inputs()
         self._refresh_mix_emptiness()
         self._start_meters()
         self._start_stream_poll()
@@ -147,6 +152,8 @@ class WaveXLRWindow(Adw.ApplicationWindow):
                 "width": self.get_width(),
                 "height": self.get_height(),
                 "maximized": self.is_maximized(),
+                "offered_capture_nodes": sorted(
+                    getattr(self, "_offered_nodes", set())),
                 "gain_locked": bool(
                     getattr(self, "gain_lock", None) and self.gain_lock.get_active()
                 ),
@@ -258,7 +265,7 @@ class WaveXLRWindow(Adw.ApplicationWindow):
                 name=source.get("name", source_id),
                 icon_name=source.get("icon_name", "applications-multimedia-symbolic"),
                 has_level=True,
-                removable=True,
+                removable=not sources_module.is_protected(source),
                 editable=True,
                 reorderable=True,
                 is_capture=sources_module.kind(source) == sources_module.KIND_DEVICE,
@@ -563,7 +570,11 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         self.mix_scale_row.set_visible(profile.has_monitor_mix)
         if profile.has_monitor_mix:
             self.mix_scale.get_adjustment().set_upper(profile.mix_max)
-        self.mic_source.set_name(profile.display_name)
+        # Deliberately not naming the row from the USB profile: with two
+        # Elgato devices connected the profile that opened over USB and the
+        # capture node this row carries can be different hardware, and a row
+        # labelled after the wrong one is worse than a generic label.
+        self._name_builtin_mic_row()
         self.status_label.set_label(f"OpenWave — {profile.display_name}")
 
     def _format_gain(self, raw):
@@ -590,8 +601,9 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         if "monitor_mix" in state:
             self.mix_scale.set_value(state["monitor_mix"])
             self.mix_label.set_label(f"{state['monitor_mix'] / 256:.0f}%")
-        self.mic_source.set_volume(state["gain_raw"] / self._gain_max)
-        self.mic_source.set_muted(state["mute"])
+        if self.mic_source is not None:
+            self.mic_source.set_volume(state["gain_raw"] / self._gain_max)
+            self.mic_source.set_muted(state["mute"])
         self._updating_ui = False
 
     def _on_usb_error(self, e):
@@ -1047,7 +1059,7 @@ class WaveXLRWindow(Adw.ApplicationWindow):
             name=source["name"],
             icon_name=source["icon_name"],
             has_level=True,
-            removable=True,
+            removable=not sources_module.is_protected(source),
             editable=True,
             reorderable=True,
             is_capture=sources_module.kind(source) == sources_module.KIND_DEVICE,
@@ -1059,6 +1071,102 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         self.mixer.poll_streams()
         self._refresh_source_meter(source["id"])
         self._refresh_mix_emptiness()
+
+    def _drop_builtin_mic_row_if_absent(self):
+        """Remove the built-in row when there is no Wave device behind it.
+
+        OpenWave is useful without one: the mixes, the application sources and
+        any other capture device are pure PipeWire and work on their own. What
+        does not work is a row wired to a device that is not there -- its cells
+        route nothing and its meter never moves, which reads as broken rather
+        than as absent.
+        """
+        if getattr(self.mixer, "mic", None):
+            return
+        if self.matrix.source("mic") is None:
+            return
+        self.matrix.remove_source("mic")
+        self.mic_source = None
+
+    def _name_builtin_mic_row(self):
+        """Label the built-in row after the device it actually carries.
+
+        "Microphone" is ambiguous the moment a second Elgato device is
+        connected -- and which device this row ends up on depends on which
+        capture node PipeWire lists first, so a generic label hides that
+        entirely.
+        """
+        node = getattr(self.mixer, "mic", None)
+        if not node or self.mic_source is None:
+            return
+        for dev in _list_captures():
+            if dev.get("name") == node:
+                label = dev.get("short_name") or dev.get("description")
+                if label:
+                    self.mic_source.set_name(label)
+                return
+
+    def _autodiscover_elgato_inputs(self):
+        """Give every Elgato capture input a row of its own, once.
+
+        A Wave XLR or an XLR Dock is the reason someone runs this, so its
+        microphone should already be in the matrix rather than waiting to be
+        added by hand -- and with two devices connected there is no single
+        "the microphone" to speak of, which is why each is named after itself
+        rather than sharing one generic row.
+
+        Offered once, not enforced: a node this has already proposed is
+        recorded, so a row the user deletes stays deleted instead of coming
+        back on the next launch.
+        """
+        elgato_nodes = {
+            d["name"] for d in _list_captures()
+            if d.get("vendor_id") == ELGATO_VID and d.get("name")
+        }
+        # A row added before this flag existed, or one the user added by hand
+        # for the same hardware, is protected too -- what matters is the device
+        # behind it, not how the row got there.
+        promoted = False
+        for source in self._sources.values():
+            if (sources_module.kind(source) == sources_module.KIND_DEVICE
+                    and source.get("node_name") in elgato_nodes
+                    and not source.get("protected")):
+                source["protected"] = True
+                promoted = True
+        if promoted:
+            sources_module.save(self._sources)
+
+        bound = self._bound_capture_nodes()
+        added = []
+        for dev in _list_captures():
+            node = dev.get("name")
+            if dev.get("vendor_id") != ELGATO_VID:
+                continue
+            if not node or node in bound or node in self._offered_nodes:
+                continue
+            source = sources_module.new_device_source(
+                name=dev.get("short_name") or dev.get("description", node),
+                node_name=node,
+                icon_name="audio-input-microphone-symbolic",
+            )
+            # Not deletable: it is discovered from the hardware, so removing it
+            # would only reappear on the next launch and read as a bug.
+            source["protected"] = True
+            added.append(source)
+            self._offered_nodes.add(node)
+        if not added:
+            return
+        for source in added:
+            self._install_source(source)
+        # Pinned above the user's own rows: these are the device the
+        # application exists for.
+        self._sources = sources_module.set_order(
+            self._sources, [s["id"] for s in added])
+        self.matrix.reorder_sources(list(self._sources))
+        for sid in self._sources:
+            self._wire_source_row(sid)
+        self._wire_matrix_cells()
+        self._save_ui_state()
 
     def _wire_source_row(self, source_id):
         """Connect a source row's own level slider and mute.

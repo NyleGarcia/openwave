@@ -678,7 +678,10 @@ class SourceCell(Gtk.Box):
         self._mute_btn = Gtk.ToggleButton(valign=Gtk.Align.CENTER)
         self._mute_btn.add_css_class("flat")
         self._mute_btn.add_css_class("circular")
-        self._mute_icon = Gtk.Image.new_from_icon_name("audio-volume-high-symbolic")
+        self._mute_icon = Gtk.Image.new_from_icon_name(
+            "audio-input-microphone-symbolic" if is_capture
+            else "audio-volume-high-symbolic"
+        )
         self._mute_btn.set_child(self._mute_icon)
         self._mute_handler = self._mute_btn.connect("toggled", self._on_mute_toggled)
         inner.append(self._mute_btn)

@@ -172,6 +172,15 @@ def new_source(*, name, match_app_name, icon_name=DEFAULT_APP_ICON):
     }
 
 
+def is_protected(source):
+    """True for a row the user should not be able to delete.
+
+    An Elgato input is the device the application exists for; it is discovered
+    automatically and removing it would only make it come back confusing.
+    """
+    return bool((source or {}).get("protected"))
+
+
 def new_device_source(*, name, node_name, icon_name=DEFAULT_DEVICE_ICON):
     """Return a fresh capture-device source bound to a PipeWire source node.
 
@@ -201,6 +210,18 @@ def remove(sources, source_id):
     sources.pop(source_id, None)
     save(sources)
     return sources
+
+def set_order(sources, order):
+    """Rebuild the mapping in `order`, keeping anything the order omits.
+
+    Insertion order is row order, so this is how a row is pinned to the top.
+    """
+    seen = [sid for sid in order if sid in sources]
+    rest = [sid for sid in sources if sid not in seen]
+    reordered = {sid: sources[sid] for sid in seen + rest}
+    save(reordered)
+    return reordered
+
 
 def reorder(sources, source_id, delta):
     """Move a source `delta` places in the list, and persist the new order.

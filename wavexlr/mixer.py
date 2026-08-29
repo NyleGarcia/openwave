@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import signal
+import re
 import subprocess
 import threading
 import time
@@ -35,6 +36,29 @@ try:
     _libc.prctl.restype = ctypes.c_int
 except (OSError, AttributeError):
     _libc = None
+
+
+ELGATO_VID = 0x0FD9
+
+
+def _alsa_card_vendor(card_index):
+    """USB vendor id behind an ALSA card, or None if it is not a USB card."""
+    try:
+        with open(f"/proc/asound/card{int(card_index)}/usbid") as f:
+            return int(f.read().strip().split(":")[0], 16)
+    except (OSError, ValueError, TypeError):
+        return None
+
+
+def friendly_device_name(description):
+    """Trim a capture device's description to something worth showing.
+
+    ALSA reports "Elgato XLR Dock Mono"; the vendor and the channel layout are
+    noise in a mixer row that already sits under an Elgato heading.
+    """
+    name = re.sub(r"^Elgato\s+", "", str(description or "").strip())
+    name = re.sub(r"\s+(Mono|Stereo|Analog Stereo|Digital Stereo)$", "", name)
+    return name or str(description or "")
 
 
 SOURCE_SINK_PREFIX = "openwave_src_"
@@ -260,10 +284,15 @@ def list_capture_sources():
             priority = int(props.get("priority.session", 0))
         except (TypeError, ValueError):
             priority = 0
+        description = props.get("node.description") or name
         out.append({
             "name": name,
-            "description": props.get("node.description") or name,
+            "description": description,
             "priority": priority,
+            # Trimmed for display, plus the vendor behind the card so an
+            # Elgato input can be recognised without matching on strings.
+            "short_name": friendly_device_name(description),
+            "vendor_id": _alsa_card_vendor(props.get("alsa.card")),
         })
     out.sort(key=lambda source: source["description"].lower())
     return out
