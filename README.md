@@ -7,10 +7,21 @@ Linux control application for **Elgato Wave** audio devices — the **Wave XLR**
 | Device | USB ID | Controls |
 |---|---|---|
 | Wave XLR | `0fd9:007d` | Gain, mute, headphone volume, low impedance mode |
+| Wave XLR MK.2 | `0fd9:00a6` | as the Wave XLR — it enumerates as "Elgato XLR Dock" and speaks the same vendor protocol |
 | Wave:3 | `0fd9:0070` | Gain, mute, headphone volume, monitor mix |
 
 ## Features
 
+- **Mixing matrix** — user-defined mixes as columns, sources as rows. Each cell
+  is how much of that source the mix receives; each source row carries a trim
+  applying everywhere. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+- **Sources** — an application matched by name (several names per row, so one
+  fader can cover every game or two music players), or a hardware capture
+  device such as a headset microphone. One row may be the catch-all for
+  anything unmatched.
+- **Per-mix output** — every mix chooses its own output device, or none at all
+  for a mix that exists only to be captured. A mix keeps playing when the
+  window is closed.
 - **Microphone controls** — Gain, mute (syncs with hardware button)
 - **Headphone controls** — Volume (syncs with hardware knob), low impedance mode
 - **Hardware sync** — 10 Hz polling keeps the app in sync with physical controls
@@ -99,8 +110,42 @@ wavexlr/
   tray.py     — StatusNotifierItem tray icon via D-Bus
   audio.py    — PipeWire capture keepalive (fixes firmware race condition)
   daemon.py   — Systemd service entry point
-  setup.py    — First-run udev + systemd setup
+  setup.py    — First-run udev + systemd setup, generated PipeWire config
+  mixer.py    — The router: intake sinks, per-cell loopbacks, stream claiming
+  mixes.py    — Mix definitions store (~/.config/openwave/mixdefs.json)
+  sources.py  — Source definitions store (~/.config/openwave/sources.json)
+  mixmatrix.py  — The sources x mixes grid widget
+  mixdialog.py  — Create/rename a mix
+  sourcedialog.py — Add or edit a source
+  meter.py    — Level metering via pw-cat
+  service.py  — systemd/runit unit management
+  paths.py    — Install-prefix resolution
 ```
+
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) explains the routing model: why an
+application's audio is moved rather than copied, how trim and send compose, and
+why every stream gets exactly one owner.
+
+## Development
+
+Run from a checkout without installing:
+
+```bash
+python3 -m wavexlr
+```
+
+The tests cover the backend — matching, the stores, state migration, the
+generated config and the device scaling. They import neither GTK nor a running
+PipeWire, so they need no display, no audio server and no hardware:
+
+```bash
+python3 -m unittest discover -s tests -t .
+```
+
+The GUI, the USB protocol and the routing itself are not unit-tested; those are
+verified against real hardware. `python3 -m wavexlr.probe dump` reads a
+connected device and is the fastest way to check a profile — quit OpenWave
+first, since the firmware serves one process at a time.
 
 ## Credits
 
