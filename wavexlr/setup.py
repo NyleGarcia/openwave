@@ -7,6 +7,7 @@ from . import paths, service
 
 UDEV_RULES = (
     'SUBSYSTEM=="usb", ATTR{idVendor}=="0fd9", ATTR{idProduct}=="007d", MODE="0666"',  # Wave XLR
+    'SUBSYSTEM=="usb", ATTR{idVendor}=="0fd9", ATTR{idProduct}=="00a6", MODE="0666"',  # Wave XLR MK.2
     'SUBSYSTEM=="usb", ATTR{idVendor}=="0fd9", ATTR{idProduct}=="0070", MODE="0666"',  # Wave:3
 )
 UDEV_PATH = "/etc/udev/rules.d/99-openwave.rules"
@@ -97,6 +98,7 @@ EOF
 udevadm control --reload-rules
 udevadm trigger --subsystem-match=usb --attr-match=idVendor=0fd9 --attr-match=idProduct=007d
 udevadm trigger --subsystem-match=usb --attr-match=idVendor=0fd9 --attr-match=idProduct=0070
+udevadm trigger --subsystem-match=usb --attr-match=idVendor=0fd9 --attr-match=idProduct=00a6
 # Also chmod the device node directly so no replug is needed
 for dev in /dev/bus/usb/*/; do
     for f in "$dev"*; do
