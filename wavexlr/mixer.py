@@ -37,6 +37,11 @@ except (OSError, AttributeError):
     _libc = None
 
 
+def _is_output_key(key):
+    """True for a mix's output loopback, which outlives this process."""
+    return isinstance(key, tuple) and len(key) == 2 and key[0] == "output"
+
+
 def _set_pdeathsig():
     if _libc is not None:
         _libc.prctl(_PR_SET_PDEATHSIG, int(signal.SIGTERM), 0, 0, 0)
@@ -588,7 +593,8 @@ class Mixer:
             return dict(self._streams)
 
     # ----- subprocess lifecycle -----
-    def _spawn_loopback(self, key, capture_source_name, playback_target, node_name):
+    def _spawn_loopback(self, key, capture_source_name, playback_target,
+                        node_name, detach=False):
         """Spawn a pw-loopback and *manually* link the capture side to
         `capture_source_name`'s output ports. We disable autoconnect on capture
         because the session manager will otherwise hijack the loopback by
@@ -596,6 +602,13 @@ class Mixer:
         target.object can't be resolved to a Source node — which is exactly
         the case for null-sink monitors. The link is set up after a brief
         wait so the node has time to register.
+
+        detach=True leaves the child outside this process's lifetime: no
+        PR_SET_PDEATHSIG and its own session. That is for the loopbacks that
+        carry a mix to hardware, which must keep playing when the window is
+        closed -- the default sink is a null sink, so losing them silences the
+        whole machine, not just OpenWave. Cell loopbacks stay tied to the
+        process: they are mixing state, and are rebuilt on the next start.
         """
         if key in self._procs:
             return
@@ -613,7 +626,8 @@ class Mixer:
                 ],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
-                preexec_fn=_set_pdeathsig,
+                preexec_fn=None if detach else _set_pdeathsig,
+                start_new_session=detach,
             )
         except (FileNotFoundError, OSError):
             return
@@ -660,8 +674,13 @@ class Mixer:
                 pass
 
     def _atexit_cleanup(self):
-        """Fast best-effort tear-down on interpreter exit. No locking, no waits."""
-        for proc in list(self._procs.values()):
+        """Fast best-effort tear-down on interpreter exit. No locking, no waits.
+
+        Output loopbacks are skipped for the same reason stop() skips them.
+        """
+        for key, proc in list(self._procs.items()):
+            if _is_output_key(key):
+                continue
             try:
                 proc.terminate()
             except (OSError, ProcessLookupError):
@@ -687,6 +706,12 @@ class Mixer:
             pass
         with self._lock:
             for key in list(self._procs.keys()):
+                if _is_output_key(key):
+                    # Deliberately left running; _sweep_stale_loopbacks reclaims
+                    # it on the next start. Tearing it down here would undo the
+                    # detach for every ordinary quit.
+                    self._procs.pop(key, None)
+                    continue
                 self._destroy_loopback(key)
 
     def set_cell(self, source_id, mix_id, volume, muted):
@@ -867,7 +892,7 @@ class Mixer:
         if target is None:
             return
         self._spawn_loopback(
-            key, mix_sink, target, f"openwave_loop_out_{mix_id}",
+            key, mix_sink, target, f"openwave_loop_out_{mix_id}", detach=True,
         )
 
     def _respawn_all_output_loopbacks(self):
