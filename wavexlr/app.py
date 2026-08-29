@@ -12,7 +12,7 @@ import threading
 
 from .device import WaveDevice
 from .meter import MeterMonitor
-from .mixer import Mixer, list_output_sinks, OUTPUT_AUTO
+from .mixer import Mixer, list_output_sinks, OUTPUT_AUTO, OUTPUT_NONE
 from .mixmatrix import MixMatrix
 from .sourcedialog import AddSourceDialog
 from . import paths, setup, service, sources as sources_module, mixes as mixes_module
@@ -479,11 +479,20 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         self._usb_async(lambda: self.dev.set_hp_volume_db(db), on_error=self._on_usb_error)
         return False
 
+    def _primary_mix_id(self):
+        """The mix the device-pane picker controls."""
+        if "personal" in self._mixes:
+            return "personal"
+        return next(iter(self._mixes), None)
+
     def _refresh_outputs(self):
         """Rebuild the output picker from the live sink list."""
+        mix_id = self._primary_mix_id()
+        if mix_id is None:
+            return
         sinks = list_output_sinks()
-        current = self.mixer.get_output()
-        resolved = self.mixer.resolve_output()
+        current = self.mixer.get_output(mix_id)
+        resolved = self.mixer.resolve_output(mix_id, sinks=sinks)
 
         auto_label = "Automatic"
         if resolved:
@@ -496,16 +505,20 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         self._updating_outputs = True
         try:
             self.output_model.splice(0, self.output_model.get_n_items(), None)
-            self._output_names = [OUTPUT_AUTO]
+            # Automatic stays at index 0: the not-found fallback below selects
+            # index 0, and that must describe what the audio is actually doing.
+            self._output_names = [OUTPUT_AUTO, OUTPUT_NONE]
             self.output_model.append(auto_label)
+            self.output_model.append("Not monitored")
             for sink in sinks:
                 self.output_model.append(sink["description"])
                 self._output_names.append(sink["name"])
-            try:
-                index = self._output_names.index(current)
-            except ValueError:
-                index = 0
-            self.output_row.set_selected(index)
+            if current not in self._output_names:
+                # A remembered device that is currently absent: show it rather
+                # than silently substituting a sentinel.
+                self.output_model.append(f"{current} (unavailable)")
+                self._output_names.append(current)
+            self.output_row.set_selected(self._output_names.index(current))
         finally:
             self._updating_outputs = False
 
@@ -515,7 +528,10 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         index = row.get_selected()
         if not 0 <= index < len(self._output_names):
             return
-        self.mixer.set_output(self._output_names[index])
+        mix_id = self._primary_mix_id()
+        if mix_id is None:
+            return
+        self.mixer.set_output(mix_id, self._output_names[index])
         # Re-label "Automatic" once the mixer has resolved the new target.
         GLib.timeout_add(400, self._refresh_outputs_once)
 

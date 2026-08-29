@@ -42,14 +42,20 @@ def _set_pdeathsig():
 
 CONFIG_PATH = os.path.expanduser("~/.config/openwave/mixes.json")
 
-PERSONAL_MIX_SINK = "openwave_personal_mix"
-HP_LOOPBACK_KEY = "_personal_to_hp"
-HP_LOOPBACK_NODE = "openwave_loop_personal_to_hp"
 
 # Reserved key in mixes.json holding the Personal Mix's output device. Cell
 # keys are always "<source>.<mix>", so a bare word cannot collide with one.
-OUTPUT_STATE_KEY = "output"
+# Per-mix output devices live under a nested reserved key. Cell keys are
+# always "<source>.<mix>", so a dot-free word cannot collide with one.
+OUTPUTS_STATE_KEY = "outputs"
+# Superseded scalar holding the Personal Mix's output. Still written for one
+# release so an older build reading this file keeps working.
+LEGACY_OUTPUT_KEY = "output"
 OUTPUT_AUTO = "auto"
+OUTPUT_NONE = "none"
+# The mix seeded as "what you hear" monitors by default; anything else stays
+# silent until asked, which is correct for a mix that only gets captured.
+_MONITORING_MIX_ID = "personal"
 
 
 def _pactl_short(kind):
@@ -236,6 +242,8 @@ class Mixer:
         self._lock = Lock()
         self._procs = {}
         self._state = self._load_state()
+        if self._migrate_state():
+            self._save_state()
         self._sources = {}
         self._mixes = {}
         self._streams = {}
@@ -288,11 +296,36 @@ class Mixer:
 
     # ----- persistence -----
     def _load_state(self):
+        """Read persisted state. Pure: never writes, since it is what
+        produces self._state and writing from here would race its own caller."""
         try:
             with open(CONFIG_PATH) as f:
-                return json.load(f)
-        except (FileNotFoundError, json.JSONDecodeError):
+                data = json.load(f)
+        except (OSError, json.JSONDecodeError):
             return {}
+        if not isinstance(data, dict):
+            return {}
+        return data
+
+    def _migrate_state(self):
+        """Fold the legacy scalar output key into the per-mix mapping.
+
+        Returns True if anything changed. Called once from __init__ after
+        _load_state, never from inside it.
+        """
+        outputs = self._state.get(OUTPUTS_STATE_KEY)
+        if not isinstance(outputs, dict):
+            outputs = {}
+        legacy = self._state.get(LEGACY_OUTPUT_KEY)
+        changed = False
+        if isinstance(legacy, str) and _MONITORING_MIX_ID not in outputs:
+            # Only when unset: a per-mix choice is newer than the scalar.
+            outputs[_MONITORING_MIX_ID] = legacy
+            changed = True
+        if changed or OUTPUTS_STATE_KEY not in self._state:
+            self._state[OUTPUTS_STATE_KEY] = outputs
+            changed = True
+        return changed
 
     def _save_state(self):
         os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
@@ -310,48 +343,70 @@ class Mixer:
         """Per-cell state only; reserved scalar keys are not cells."""
         return {k: v for k, v in self._state.items() if "." in k}
 
-    def resolve_output(self):
-        """The sink the Personal Mix should feed, or None if nothing is eligible.
+    def _default_output_for(self, mix_id):
+        return OUTPUT_AUTO if mix_id == _MONITORING_MIX_ID else OUTPUT_NONE
 
-        Explicit user choice first, then the Wave device's own headphone jack,
-        then the system default, then the highest-priority output. Each
-        candidate is checked against the live sink list, so a device that has
-        been unplugged, or a card profile that no longer exposes an output,
-        falls through instead of leaving the mix with no outlet.
+    def get_output(self, mix_id):
+        """The persisted choice for a mix: a sink name, OUTPUT_AUTO or OUTPUT_NONE."""
+        outputs = self._state.get(OUTPUTS_STATE_KEY) or {}
+        return outputs.get(mix_id, self._default_output_for(mix_id))
 
-        The default-sink step usually does not fire: the Personal Mix is
-        typically *itself* the default sink, and it is not eligible. The
-        priority fallback is what makes the automatic setting resolve to
-        something audible on a machine whose Wave device has no usable
-        headphone output.
+    def resolve_output(self, mix_id, sinks=None, default_sink=None):
+        """The sink a mix should feed, or None if it should not be monitored.
+
+        Explicit choice first, then the Wave device's own headphone jack, then
+        the system default, then the highest-priority output. Each candidate is
+        checked against the live sink list, so an unplugged device or a card
+        profile that no longer exposes an output falls through instead of
+        leaving the mix with no outlet.
+
+        The default-sink step rarely fires: the monitoring mix is typically
+        itself the default sink, and mix sinks are not eligible. The priority
+        fallback is what makes OUTPUT_AUTO resolve to something audible on a
+        machine whose Wave device has no usable headphone output.
+
+        `sinks` and `default_sink` may be passed in by a caller resolving
+        several mixes at once, so the subprocess cost is paid once rather than
+        per mix.
         """
-        sinks = list_output_sinks()
+        choice = self.get_output(mix_id)
+        if choice == OUTPUT_NONE:
+            return None
+
+        if sinks is None:
+            sinks = list_output_sinks()
         eligible = {sink["name"] for sink in sinks}
 
-        choice = self._state.get(OUTPUT_STATE_KEY, OUTPUT_AUTO)
         if choice and choice != OUTPUT_AUTO and choice in eligible:
             return choice
 
         if self.hp and self.hp in eligible:
             return self.hp
 
-        default = _default_sink_name()
-        if default and default in eligible:
-            return default
+        if default_sink is None:
+            default_sink = _default_sink_name()
+        if default_sink and default_sink in eligible:
+            return default_sink
 
         if sinks:
             return max(sinks, key=lambda sink: sink["priority"])["name"]
         return None
 
-    def get_output(self):
-        """The persisted output choice: a sink name, or OUTPUT_AUTO."""
-        return self._state.get(OUTPUT_STATE_KEY, OUTPUT_AUTO)
-
-    def set_output(self, name):
-        """Persist the output choice and respawn the Personal->output loopback."""
-        self._state[OUTPUT_STATE_KEY] = name or OUTPUT_AUTO
-        self._save_state()
-        self._enqueue(("output",), self._do_retarget_output)
+    def set_output(self, mix_id, name):
+        """Persist a mix's output choice and respawn its loopback."""
+        with self._lock:
+            outputs = self._state.get(OUTPUTS_STATE_KEY)
+            if not isinstance(outputs, dict):
+                outputs = {}
+                self._state[OUTPUTS_STATE_KEY] = outputs
+            outputs[mix_id] = name or OUTPUT_AUTO
+            if mix_id == _MONITORING_MIX_ID:
+                # Keep the superseded scalar in step for one release.
+                self._state[LEGACY_OUTPUT_KEY] = outputs[mix_id]
+            self._save_state()
+        self._enqueue(
+            ("output", mix_id), lambda mid=mix_id: self._do_retarget_output(mid),
+        )
 
     def streams(self):
         """Snapshot of currently-known PipeWire output streams (id → info)."""
@@ -529,24 +584,39 @@ class Mixer:
     # ----- worker-side implementations -----
     def _do_start(self):
         self._sweep_stale_loopbacks()
-        self._respawn_output_loopback()
+        self._respawn_all_output_loopbacks()
         with self._lock:
             self._streams = {s["id"]: s for s in list_audio_streams()}
         self._started = True
         self._reconcile_all()
 
-    def _respawn_output_loopback(self):
-        """(Re)create the Personal->output loopback for the current target."""
-        self._destroy_loopback(HP_LOOPBACK_KEY)
-        target = self.resolve_output()
+    def _respawn_output_loopback(self, mix_id, sinks=None, default_sink=None):
+        """(Re)create one mix's output loopback for its current target."""
+        key = ("output", mix_id)
+        self._destroy_loopback(key)
+        mix_sink = self._mix_sink(mix_id)
+        if not mix_sink:
+            return
+        target = self.resolve_output(mix_id, sinks=sinks, default_sink=default_sink)
         if target is None:
             return
         self._spawn_loopback(
-            HP_LOOPBACK_KEY, PERSONAL_MIX_SINK, target, HP_LOOPBACK_NODE,
+            key, mix_sink, target, f"openwave_loop_out_{mix_id}",
         )
 
-    def _do_retarget_output(self):
-        self._respawn_output_loopback()
+    def _respawn_all_output_loopbacks(self):
+        """Retarget every mix, paying the sink-enumeration cost once."""
+        sinks = list_output_sinks()
+        default_sink = _default_sink_name()
+        with self._lock:
+            mix_ids = list(self._mixes)
+        for mix_id in mix_ids:
+            self._respawn_output_loopback(
+                mix_id, sinks=sinks, default_sink=default_sink,
+            )
+
+    def _do_retarget_output(self, mix_id):
+        self._respawn_output_loopback(mix_id)
 
     def _do_remove_source(self, source_id):
         with self._lock:
