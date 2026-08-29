@@ -11,6 +11,7 @@ profiles.py; connect() picks the first supported device found.
 
 import ctypes
 import ctypes.util
+import re
 import struct
 import subprocess
 import threading
@@ -85,24 +86,44 @@ def _alsa_get(card):
     return state
 
 
+# Control ranges differ per device and per kernel driver, so they are read
+# from the driver rather than assumed. Cached: they cannot change for a card.
+_ALSA_CTL_MAX = {}
+
+
+def _alsa_ctl_max(card, numid, fallback):
+    """The highest value a control accepts, per the driver."""
+    key = (card, numid)
+    if key not in _ALSA_CTL_MAX:
+        match = re.search(r",max=(-?\d+)", _amixer(card, "cget", f"numid={numid}"))
+        _ALSA_CTL_MAX[key] = int(match.group(1)) if match else fallback
+    return _ALSA_CTL_MAX[key]
+
+
 def _alsa_set_mute(card, muted):
     _amixer(card, "cset", "numid=5", "off" if muted else "on")
 
 
 def _alsa_set_hp_vol(card, value):
-    """Set ALSA HP volume (numid=4, 0-120)."""
-    _amixer(card, "cset", "numid=4", str(max(0, min(120, value))))
+    """Set ALSA HP volume (numid=4), clamped to the control's real range."""
+    top = _alsa_ctl_max(card, 4, 120)
+    _amixer(card, "cset", "numid=4", str(max(0, min(top, value))))
 
 
 def _alsa_set_gain(card, value):
-    """Set ALSA mic gain (numid=6, 0-80)."""
-    _amixer(card, "cset", "numid=6", str(max(0, min(80, value))))
+    """Set ALSA mic gain (numid=6), clamped to the control's real range."""
+    top = _alsa_ctl_max(card, 6, 150)
+    _amixer(card, "cset", "numid=6", str(max(0, min(top, value))))
 
 
 def _fw_gain_to_alsa(fw_gain_raw, scale):
-    """Map firmware gain (raw / scale dB) to ALSA (0-80, 0.5 dB steps)."""
-    db = fw_gain_raw / scale
-    return max(0, min(80, round(db / 0.5)))
+    """Map firmware gain (raw / scale dB) to ALSA steps of 0.5 dB.
+
+    The upper clamp belongs to the setter, which knows the control's real
+    range. Clamping here to a constant silently halved any gain above 40 dB
+    on a device whose control goes higher.
+    """
+    return max(0, round((fw_gain_raw / scale) / 0.5))
 
 
 def _fw_hp_to_alsa(fw_hp_raw, scale):
