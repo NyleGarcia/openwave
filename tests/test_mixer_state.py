@@ -145,6 +145,63 @@ class SourceTrim(unittest.TestCase):
         self.assertEqual(bare_mixer()._source_gain("mic"), 1.0)
 
 
+class DefaultSinkRescue(unittest.TestCase):
+    """An intake sink must never be where the system sends its audio.
+
+    It is an ordinary sink to the session manager, so it can win the
+    default-sink election -- observed after a PipeWire restart, when the mix
+    sinks were not yet present. The result is not silence: every application
+    lands in one source row at that row's send level, which is quiet and in
+    the wrong place, and looks like nothing is broken.
+    """
+
+    def setUp(self):
+        self.moved = []
+        self._run = mixer_mod.subprocess.run
+        self._default = mixer_mod._default_sink_name
+        mixer_mod.subprocess.run = lambda cmd, **kw: self.moved.append(cmd)
+
+    def tearDown(self):
+        mixer_mod.subprocess.run = self._run
+        mixer_mod._default_sink_name = self._default
+
+    def _rescue(self, current_default, mixes):
+        mixer_mod._default_sink_name = lambda: current_default
+        bare_mixer(_mixes=mixes)._rescue_default_sink()
+
+    def test_it_moves_off_an_intake_sink(self):
+        self._rescue("openwave_src_system",
+                     {"personal": {"sink": "openwave_personal_mix"}})
+        self.assertEqual(self.moved,
+                         [["pactl", "set-default-sink", "openwave_personal_mix"]])
+
+    def test_it_targets_the_first_mix(self):
+        self._rescue("openwave_src_music", {
+            "chat": {"sink": "openwave_chat_mix"},
+            "personal": {"sink": "openwave_personal_mix"},
+        })
+        self.assertEqual(self.moved[0][-1], "openwave_chat_mix")
+
+    def test_it_leaves_a_hardware_default_alone(self):
+        self._rescue("alsa_output.usb-Headset",
+                     {"personal": {"sink": "openwave_personal_mix"}})
+        self.assertEqual(self.moved, [])
+
+    def test_it_leaves_a_mix_default_alone(self):
+        # The normal, intended state.
+        self._rescue("openwave_personal_mix",
+                     {"personal": {"sink": "openwave_personal_mix"}})
+        self.assertEqual(self.moved, [])
+
+    def test_it_does_nothing_with_no_mix_to_move_to(self):
+        self._rescue("openwave_src_system", {})
+        self.assertEqual(self.moved, [])
+
+    def test_it_tolerates_an_unknown_default(self):
+        self._rescue(None, {"personal": {"sink": "openwave_personal_mix"}})
+        self.assertEqual(self.moved, [])
+
+
 class SinkNaming(unittest.TestCase):
     def test_intake_names_are_derived_from_the_source_id(self):
         self.assertEqual(mixer_mod.source_sink_name("music"),

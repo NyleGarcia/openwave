@@ -58,6 +58,21 @@ Consequences worth knowing:
   sink created by `pw-cli` dies the instant `pw-cli` exits. They therefore
   outlive OpenWave, and are swept at startup if a crash left one behind.
 
+### Intake sinks and the default-sink election
+
+An intake sink is internal, but it is an ordinary sink as far as the session
+manager is concerned, so it can be chosen as the system default. That has been
+observed after a PipeWire restart, when the mix sinks were not yet present for
+the election to consider.
+
+The result is worse than an obvious failure: every application lands in one
+source row, at that row's send level. Audio does not stop, it goes quiet and
+arrives in the wrong place, and nothing on screen looks broken.
+
+Intake sinks are therefore created with `priority.session=0`, which loses to
+everything including every mix, and the default is moved back onto a mix at
+startup if one has already won.
+
 ## Trim and send
 
 Two levels apply to every source:
