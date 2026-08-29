@@ -137,10 +137,12 @@ class WaveXLRWindow(Adw.ApplicationWindow):
                 icon_name=source.get("icon_name", "applications-multimedia-symbolic"),
                 has_level=True,
                 removable=True,
+                editable=True,
             )
 
         self.matrix.connect("add-source-clicked", self._on_add_source_clicked)
         self.matrix.connect("remove-source-clicked", self._on_remove_source_clicked)
+        self.matrix.connect("edit-source-clicked", self._on_edit_source_clicked)
         self.matrix.connect("add-mix-clicked", self._on_add_mix_clicked)
         self.matrix.connect("rename-mix-clicked", self._on_rename_mix_clicked)
         self.matrix.connect("remove-mix-clicked", self._on_remove_mix_clicked)
@@ -886,12 +888,60 @@ class WaveXLRWindow(Adw.ApplicationWindow):
             icon_name=source["icon_name"],
             has_level=True,
             removable=True,
+            editable=True,
         )
         for mix_id in self._mixes:
             self._wire_cell(source["id"], mix_id)
         self.mixer.set_sources(self._sources)
         self.mixer.poll_streams()
         self._refresh_source_meter(source["id"])
+
+    def _on_edit_source_clicked(self, _matrix, source_id):
+        source = self._sources.get(source_id)
+        if source is None:
+            return
+        dialog = AddSourceDialog(source=source)
+        dialog.connect("source-edited", self._on_source_edited)
+        dialog.present(self)
+
+    def _on_source_edited(self, _dialog, source_id, name, binding, icon_name):
+        if source_id not in self._sources:
+            return  # removed while the dialog was open
+        source = self._sources[source_id]
+        is_device = sources_module.kind(source) == sources_module.KIND_DEVICE
+        # Snapshot BEFORE update: sources.update mutates the record in place,
+        # so reading afterwards would always compare a value to itself.
+        old_binding = source.get("node_name" if is_device else "match_app_name")
+
+        # sources_module.update, never new_source: the id is the prefix of every
+        # "<source_id>.<mix_id>" cell key, so a fresh id would orphan the levels.
+        fields = {"name": name, "icon_name": icon_name}
+        if not is_device:
+            # A device's binding is its node_name, which the dialog shows but
+            # does not offer to edit — it is picked from live hardware, and
+            # `binding` arrives empty for that flow.
+            fields["match_app_name"] = binding
+        self._sources = sources_module.update(self._sources, source_id, **fields)
+
+        cell = self.matrix.source(source_id)
+        if cell is not None:
+            cell.set_name(name)
+            cell.set_icon(icon_name)
+
+        if not is_device and binding != old_binding:
+            # _refresh_app_meter early-returns when the cached target is still
+            # the current candidate, so a stale entry pointing at the OLD app's
+            # stream would keep metering the wrong application forever.
+            self.meter.stop(source_id)
+            self._meter_targets.pop(source_id, None)
+            self._set_source_level(source_id, 0.0)
+
+        # poll_streams BEFORE set_sources: it refreshes Mixer._streams inline on
+        # this thread, so the reconcile set_sources enqueues sees the current
+        # stream set instead of a cache up to 2 s old.
+        self.mixer.poll_streams()
+        self.mixer.set_sources(self._sources)
+        self._refresh_source_meter(source_id)
 
     def _on_remove_source_clicked(self, _matrix, source_id):
         source = self._sources.get(source_id, {})

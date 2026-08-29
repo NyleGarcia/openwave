@@ -18,6 +18,7 @@ class MixMatrix(Gtk.Box):
     __gsignals__ = {
         "add-source-clicked": (GObject.SignalFlags.RUN_FIRST, None, ()),
         "remove-source-clicked": (GObject.SignalFlags.RUN_FIRST, None, (str,)),
+        "edit-source-clicked": (GObject.SignalFlags.RUN_FIRST, None, (str,)),
         "add-mix-clicked": (GObject.SignalFlags.RUN_FIRST, None, ()),
         "rename-mix-clicked": (GObject.SignalFlags.RUN_FIRST, None, (str,)),
         "remove-mix-clicked": (GObject.SignalFlags.RUN_FIRST, None, (str,)),
@@ -157,12 +158,18 @@ class MixMatrix(Gtk.Box):
         if header is not None:
             header.set_outputs(entries, current, summary, monitored)
 
-    def add_source(self, source_id, *, name, icon_name, has_level=False, removable=False):
+    def add_source(self, source_id, *, name, icon_name, has_level=False,
+                   removable=False, editable=False):
         row = len(self._source_ids) + 1
         source = SourceCell(
             name=name, icon_name=icon_name,
-            has_level=has_level, removable=removable,
+            has_level=has_level, removable=removable, editable=editable,
         )
+        if editable:
+            source.connect(
+                "edit-clicked",
+                lambda _s, sid=source_id: self.emit("edit-source-clicked", sid),
+            )
         if removable:
             source.connect(
                 "remove-clicked",
@@ -455,9 +462,10 @@ class SourceCell(Gtk.Box):
         "volume-changed": (GObject.SignalFlags.RUN_FIRST, None, (float,)),
         "mute-toggled": (GObject.SignalFlags.RUN_FIRST, None, (bool,)),
         "remove-clicked": (GObject.SignalFlags.RUN_FIRST, None, ()),
+        "edit-clicked": (GObject.SignalFlags.RUN_FIRST, None, ()),
     }
 
-    def __init__(self, *, name, icon_name, has_level, removable=False):
+    def __init__(self, *, name, icon_name, has_level, removable=False, editable=False):
         super().__init__(
             orientation=Gtk.Orientation.HORIZONTAL,
             spacing=10,
@@ -477,9 +485,9 @@ class SourceCell(Gtk.Box):
         )
         self.append(inner)
 
-        icon = Gtk.Image.new_from_icon_name(icon_name)
-        icon.set_pixel_size(26)
-        inner.append(icon)
+        self._icon = Gtk.Image.new_from_icon_name(icon_name)
+        self._icon.set_pixel_size(26)
+        inner.append(self._icon)
 
         text = Gtk.Box(
             orientation=Gtk.Orientation.VERTICAL,
@@ -543,6 +551,17 @@ class SourceCell(Gtk.Box):
             self._level.add_offset_value(Gtk.LEVEL_BAR_OFFSET_FULL, 1.00)
             inner.append(self._level)
 
+        if editable:
+            edit_btn = Gtk.Button(
+                icon_name="document-edit-symbolic",
+                valign=Gtk.Align.CENTER,
+                tooltip_text="Edit source",
+            )
+            edit_btn.add_css_class("flat")
+            edit_btn.add_css_class("circular")
+            edit_btn.connect("clicked", lambda _: self.emit("edit-clicked"))
+            inner.append(edit_btn)
+
         if removable:
             remove_btn = Gtk.Button(
                 icon_name="window-close-symbolic",
@@ -556,6 +575,9 @@ class SourceCell(Gtk.Box):
 
     def set_name(self, name):
         self._name_lbl.set_label(name)
+
+    def set_icon(self, icon_name):
+        self._icon.set_from_icon_name(icon_name)
     def set_available(self, available, *, reason="Device not connected"):
         """Dim the row when the device behind it is gone.
 

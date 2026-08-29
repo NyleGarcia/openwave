@@ -1,10 +1,14 @@
-"""'Add Source' picker: source kind, then a per-kind picker, then name + icon.
+"""'Add Source': source kind, then a per-kind picker, then name + icon.
 
 Page 0 forks between an application source and a hardware capture device. The
-app branch and the device branch share nothing but the final name/icon page,
-which is parameterised so each branch supplies its own defaults and confirm
-handler; each branch emits its own signal so neither has to know the other
-exists.
+app branch can also bind an application that is not running, by typing its
+name. The branches share only the final name/icon page, which is parameterised
+so each supplies its own defaults and confirm handler, and each emits its own
+signal so neither has to know the other exists.
+
+Passing source= opens straight to the config page in edit mode: the pickers
+list only what is present right now, and requiring the bound app to be playing
+in order to rename its row would be nonsense.
 """
 
 import gi
@@ -14,6 +18,7 @@ gi.require_version("Adw", "1")
 from gi.repository import Gtk, Adw, GObject  # noqa: E402
 
 from .mixer import list_audio_streams, list_capture_sources
+from . import sources as sources_module
 
 ICON_CHOICES = (
     ("applications-multimedia-symbolic", "Generic"),
@@ -35,31 +40,44 @@ class AddSourceDialog(Adw.Dialog):
     __gsignals__ = {
         # (display_name, match_app_name, icon_name)
         "source-confirmed": (GObject.SignalFlags.RUN_FIRST, None, (str, str, str)),
-        # (display_name, capture_node_name, icon_name). A second signal rather
-        # than a `kind` argument on the first: the two flows then share no
-        # signature, so neither has to be edited when the other changes.
+        # (display_name, capture_node_name, icon_name)
         "device-source-confirmed": (GObject.SignalFlags.RUN_FIRST, None, (str, str, str)),
+        # (source_id, display_name, binding, icon_name). `binding` is the
+        # match_app_name for an app source and "" for a device source, whose
+        # node_name is hardware and is not editable here.
+        "source-edited": (GObject.SignalFlags.RUN_FIRST, None, (str, str, str, str)),
     }
 
-    def __init__(self, *, exclude_nodes=()):
+    def __init__(self, source=None, *, exclude_nodes=()):
         super().__init__()
-        self.set_title("Add Source")
+        self._source = source
+        self._editing_device = (
+            source is not None
+            and sources_module.kind(source) == sources_module.KIND_DEVICE
+        )
+        self.set_title("Edit Source" if source else "Add Source")
         self.set_content_width(480)
         self.set_content_height(560)
 
         self._nav = Adw.NavigationView()
         self.set_child(self._nav)
 
-        # Capture nodes that already have a matrix row. Keyword-only with a
-        # default so an existing AddSourceDialog() call site keeps working.
+        # Capture nodes that already have a matrix row.
         self._exclude_nodes = frozenset(exclude_nodes)
-        self._selected_app = None
+        # None = nothing picked yet, "" = manual entry, else the picked app.
+        self._selected_app = None if source is None else source.get("match_app_name")
         self._selected_device = None
-        self._selected_icon = ICON_CHOICES[0][0]
+        self._selected_icon = (source or {}).get("icon_name") or ICON_CHOICES[0][0]
 
-        self._nav.push(self._build_type_page())
+        if source is None:
+            self._nav.push(self._build_type_page())
+        else:
+            # Config page as the navigation root; it packs its own Cancel,
+            # because the type page that normally carries one was never built.
+            self._nav.push(self._build_config_page(
+                show_app_row=not self._editing_device,
+            ))
 
-    # ------------------------------------------------------------ page 0
     def _build_type_page(self):
         """Fork between the source kinds.
 
@@ -215,6 +233,10 @@ class AddSourceDialog(Adw.Dialog):
             default_name=self._selected_device["description"],
             default_icon="microphone-sensitivity-high-symbolic",
             on_confirm=self._on_device_confirm,
+            # A capture device has no application name, and confirm is gated
+            # on that row being non-empty: leaving it in would make the device
+            # flow impossible to complete.
+            show_app_row=False,
         ))
 
     def _on_device_confirm(self, _btn):
@@ -240,10 +262,6 @@ class AddSourceDialog(Adw.Dialog):
         header = Adw.HeaderBar()
         view.add_top_bar(header)
 
-        cancel_btn = Gtk.Button(label="Cancel")
-        cancel_btn.connect("clicked", lambda _: self.close())
-        header.pack_start(cancel_btn)
-
         self._next_btn = Gtk.Button(label="Next")
         self._next_btn.add_css_class("suggested-action")
         self._next_btn.set_sensitive(False)
@@ -263,8 +281,9 @@ class AddSourceDialog(Adw.Dialog):
         clamp.set_child(outer)
 
         hint = Gtk.Label(
-            label="Pick an application that's currently playing audio. "
-                  "OpenWave will route any future streams from this app through the new source row.",
+            label="Pick an application that's currently playing audio, or enter one "
+                  "manually if it isn't running yet. OpenWave will route any future "
+                  "streams from that app through the new source row.",
             wrap=True, xalign=0,
         )
         hint.add_css_class("dim-label")
@@ -287,10 +306,9 @@ class AddSourceDialog(Adw.Dialog):
 
         if not apps:
             empty = Adw.ActionRow(title="No audio streams playing")
-            empty.set_subtitle("Start playback in an app, then click + Add Source again")
+            empty.set_subtitle("Start playback in an app, or enter a name manually below")
             empty.set_sensitive(False)
             self._listbox.append(empty)
-            return
 
         for app_name in sorted(apps.keys()):
             row = Adw.ActionRow(title=app_name)
@@ -301,29 +319,45 @@ class AddSourceDialog(Adw.Dialog):
             row._app_name = app_name  # noqa: SLF001
             self._listbox.append(row)
 
+        # Always offered. An app that isn't running publishes no stream, so
+        # without this row it could never be bound at all -- and with an empty
+        # list the page is otherwise a dead end, since the placeholder row is
+        # insensitive and Next stays disabled forever.
+        manual = Adw.ActionRow(title="Enter manually…")
+        manual.set_subtitle("Bind an application that isn't running yet")
+        manual.add_prefix(Gtk.Image.new_from_icon_name("document-edit-symbolic"))
+        manual._app_name = ""  # noqa: SLF001
+        self._listbox.append(manual)
+
     def _on_row_selected(self, _box, row):
-        if row is None:
-            self._selected_app = None
-            self._next_btn.set_sensitive(False)
-            return
-        self._selected_app = getattr(row, "_app_name", None)
-        self._next_btn.set_sensitive(self._selected_app is not None)
+        # "" is the manual row: a real choice, just with nothing prefilled.
+        # Compare against None, not truthiness, or it reads as "no selection".
+        app = getattr(row, "_app_name", None) if row is not None else None
+        self._selected_app = app
+        self._next_btn.set_sensitive(app is not None)
 
     def _on_next(self, _btn):
-        if not self._selected_app:
+        if self._selected_app is None:
             return
         self._nav.push(self._build_config_page())
 
     # ------------------------------------------------------------ page 2
     def _build_config_page(self, *, default_name=None, default_icon=None,
-                           on_confirm=None):
+                           on_confirm=None, show_app_row=True):
         """Shared final page for every source flow.
 
-        Every argument defaults to the app-picker behaviour, so an untouched
-        `self._build_config_page()` call site keeps working verbatim — which
-        matters, because the manual-app-entry flow lands on this same page.
+        Every argument defaults to the app-picker behaviour, so the plain
+        `self._build_config_page()` call in _on_next keeps working verbatim.
+
+        show_app_row is the one that is not cosmetic. The Application entry is
+        what makes a not-yet-running app bindable and a mis-bound source
+        fixable, and confirm is gated on it being non-empty — but a capture
+        device has no application name at all, so leaving the row in the device
+        flow would leave confirm permanently insensitive and make device
+        sources impossible to create.
         """
-        page = Adw.NavigationPage(title="Name and Icon")
+        editing = self._source is not None
+        page = Adw.NavigationPage(title="Edit Source" if editing else "Name and Icon")
 
         view = Adw.ToolbarView()
         page.set_child(view)
@@ -331,10 +365,17 @@ class AddSourceDialog(Adw.Dialog):
         header = Adw.HeaderBar()
         view.add_top_bar(header)
 
-        add_btn = Gtk.Button(label="Add Source")
-        add_btn.add_css_class("suggested-action")
-        add_btn.connect("clicked", on_confirm or self._on_confirm)
-        header.pack_end(add_btn)
+        if editing:
+            # This page is the navigation root, so NavigationView draws no back
+            # button and the page that carries Cancel was never built.
+            cancel_btn = Gtk.Button(label="Cancel")
+            cancel_btn.connect("clicked", lambda _: self.close())
+            header.pack_start(cancel_btn)
+
+        self._confirm_btn = Gtk.Button(label="Save" if editing else "Add Source")
+        self._confirm_btn.add_css_class("suggested-action")
+        self._confirm_btn.connect("clicked", on_confirm or self._on_confirm)
+        header.pack_end(self._confirm_btn)
 
         scroll = Gtk.ScrolledWindow(vexpand=True)
         view.set_content(scroll)
@@ -353,8 +394,45 @@ class AddSourceDialog(Adw.Dialog):
         outer.append(name_group)
 
         self._name_row = Adw.EntryRow(title="Source name")
-        self._name_row.set_text(default_name or self._selected_app or "")
+        self._name_row.set_text(
+            (self._source or {}).get("name")
+            or default_name
+            or self._selected_app
+            or ""
+        )
+        self._name_row.connect("changed", self._on_binding_changed)
         name_group.add(self._name_row)
+
+        # Application binding — app sources only.
+        self._app_row = None
+        if show_app_row:
+            app_group = Adw.PreferencesGroup(
+                title="Application",
+                description="Matched against PipeWire's application.name, its "
+                            "node.name or its process binary, ignoring case "
+                            "and spacing. Check the spelling with: "
+                            "pw-dump | grep application.name",
+            )
+            outer.append(app_group)
+
+            self._app_row = Adw.EntryRow(title="Application name")
+            self._app_row.set_text(self._selected_app or "")
+            self._app_row.connect("changed", self._on_binding_changed)
+            app_group.add(self._app_row)
+        elif editing:
+            # A device source's binding is hardware, not text: show it, do not
+            # offer to edit it. Re-pointing a row at a different capture device
+            # means adding a new row.
+            dev_group = Adw.PreferencesGroup(title="Capture Device")
+            outer.append(dev_group)
+            dev_row = Adw.ActionRow(
+                title=self._source.get("node_name", ""),
+                subtitle="The capture device this row is bound to",
+            )
+            dev_row.add_prefix(
+                Gtk.Image.new_from_icon_name("audio-input-microphone-symbolic")
+            )
+            dev_group.add(dev_row)
 
         # Icon picker
         icon_group = Adw.PreferencesGroup(title="Icon")
@@ -370,7 +448,15 @@ class AddSourceDialog(Adw.Dialog):
             homogeneous=True,
         )
         flow.add_css_class("openwave-icon-picker")
-        first_child = None
+
+        # One rule covers all three flows, so neither feature needs a fallback
+        # branch. On a plain add _selected_icon is already ICON_CHOICES[0][0],
+        # so the first child is preselected exactly as today; the device flow
+        # asks for Mic; an edit keeps its stored icon, and one no longer
+        # offered here selects nothing and is preserved rather than being
+        # silently rewritten just by opening the editor.
+        if default_icon:
+            self._selected_icon = default_icon
         preselect = None
         for icon_name, tooltip in ICON_CHOICES:
             btn = Gtk.Image.new_from_icon_name(icon_name)
@@ -380,21 +466,29 @@ class AddSourceDialog(Adw.Dialog):
             child.set_tooltip_text(tooltip)
             child._icon_name = icon_name  # noqa: SLF001
             flow.append(child)
-            if first_child is None:
-                first_child = child
-            if icon_name == default_icon:
+            if icon_name == self._selected_icon:
                 preselect = child
         flow.connect("selected-children-changed", self._on_icon_selected)
         icon_group.add(flow)
 
-        # Falls back to the first choice, which is what every existing caller
-        # got and still gets.
-        chosen = preselect or first_child
-        if chosen is not None:
-            flow.select_child(chosen)
-            self._selected_icon = chosen._icon_name  # noqa: SLF001
+        if preselect is not None:
+            flow.select_child(preselect)
 
+        self._sync_confirm()
         return page
+
+    def _on_binding_changed(self, _row):
+        self._sync_confirm()
+
+    def _sync_confirm(self):
+        """A source that binds nothing can never be metered or routed, so refuse
+        to create one rather than persisting dead config. With no Application
+        row (a capture device) the name is the only requirement."""
+        if self._app_row is not None:
+            ok = bool(self._app_row.get_text().strip())
+        else:
+            ok = bool(self._name_row.get_text().strip())
+        self._confirm_btn.set_sensitive(ok)
 
     def _on_icon_selected(self, flow):
         sel = flow.get_selected_children()
@@ -402,8 +496,19 @@ class AddSourceDialog(Adw.Dialog):
             self._selected_icon = getattr(sel[0], "_icon_name", self._selected_icon)
 
     def _on_confirm(self, _btn):
-        if not self._selected_app:
+        # Read the field, not _selected_app: with manual entry the picker's
+        # value is "" and the entry is the only source of truth.
+        app = self._app_row.get_text().strip() if self._app_row is not None else ""
+        if self._source is None and not app:
             return
-        name = self._name_row.get_text().strip() or self._selected_app
-        self.emit("source-confirmed", name, self._selected_app, self._selected_icon)
+        name = self._name_row.get_text().strip() or app
+        if not name:
+            return
+        if self._source is not None:
+            # Carry the id so app.py routes this through sources.update() and
+            # the row keeps its persisted per-mix levels.
+            self.emit("source-edited", self._source["id"], name, app,
+                      self._selected_icon)
+        else:
+            self.emit("source-confirmed", name, app, self._selected_icon)
         self.close()

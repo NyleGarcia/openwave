@@ -101,3 +101,22 @@ def remove(sources, source_id):
     sources.pop(source_id, None)
     save(sources)
     return sources
+
+def update(sources, source_id, **fields):
+    """Edit a source in place, preserving its id.
+
+    The id is structural: per-cell levels are keyed "<source_id>.<mix_id>" in
+    ~/.config/openwave/mixes.json and in Mixer's in-memory state, so minting a
+    new id (as new_source does) would silently orphan every level the user has
+    set for this row. Editing must come through here, never through
+    new_source().
+    """
+    source = sources.get(source_id)
+    if source is None:
+        return sources
+    for key, value in fields.items():
+        if key == "id":
+            continue
+        source[key] = value
+    save(sources)
+    return sources
