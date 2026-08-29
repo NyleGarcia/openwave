@@ -409,29 +409,46 @@ class AddSourceDialog(Adw.Dialog):
         name_group.add(self._name_row)
 
         # Application binding — app sources only.
-        self._app_row = None
+        # None on the capture-device page, a list on the application page.
+        self._bindings = None
         if show_app_row:
             app_group = Adw.PreferencesGroup(
-                title="Application",
-                description="Matched against PipeWire's application.name, its "
-                            "node.name or its process binary, ignoring case "
-                            "and spacing. Check the spelling with: "
-                            "pw-dump | grep application.name",
+                title="Applications",
+                description="Audio from any of these is gathered under this "
+                            "row's single fader.",
             )
             outer.append(app_group)
 
-            self._app_row = Adw.EntryRow(title="Applications")
-            self._app_row.set_text(self._selected_app or "")
-            self._app_row.connect("changed", self._on_binding_changed)
-            app_group.add(self._app_row)
-            hint = Gtk.Label(
-                label="Separate several with commas, to gather them under one "
-                      "fader \u2014 two music players, or every game.",
-                xalign=0, wrap=True, margin_top=6,
+            # A managed list rather than a comma-separated entry. The seeded
+            # rows carry a dozen names each, which is unreadable as one string
+            # and impossible to edit a single entry out of.
+            self._bindings = sources_module.parse_bindings(self._selected_app or "")
+            self._bind_group = app_group
+            self._bind_rows = []
+
+            self._add_row = Adw.EntryRow(title="Add an application")
+            add_btn = Gtk.Button(
+                icon_name="list-add-symbolic", valign=Gtk.Align.CENTER,
+                tooltip_text="Add this name",
             )
-            hint.add_css_class("dim-label")
-            hint.add_css_class("caption")
-            app_group.add(hint)
+            add_btn.add_css_class("flat")
+            add_btn.connect("clicked", lambda _b: self._add_binding_from_entry())
+            self._add_row.add_suffix(add_btn)
+            self._add_row.connect("entry-activated",
+                                  lambda _r: self._add_binding_from_entry())
+            self._add_row.connect("changed", lambda _r: self._sync_confirm())
+
+            # Anything currently making sound, minus what is already bound --
+            # the common case is "the app is running, I just do not know what
+            # PipeWire calls it".
+            self._running_btn = Gtk.MenuButton(
+                label="From running apps", halign=Gtk.Align.START, margin_top=6,
+            )
+            self._running_btn.add_css_class("flat")
+            self._running_pop = Gtk.Popover()
+            self._running_btn.set_popover(self._running_pop)
+
+            self._rebuild_bindings()
         elif editing:
             # A device source's binding is hardware, not text: show it, do not
             # offer to edit it. Re-pointing a row at a different capture device
@@ -497,11 +514,89 @@ class AddSourceDialog(Adw.Dialog):
         """A source that binds nothing can never be metered or routed, so refuse
         to create one rather than persisting dead config. With no Application
         row (a capture device) the name is the only requirement."""
-        if self._app_row is not None:
-            ok = bool(self._app_row.get_text().strip())
+        if self._bindings is not None:
+            # A pending name in the entry counts: confirming without pressing +
+            # first should not silently discard what was typed.
+            pending = self._add_row.get_text().strip() if self._add_row else ""
+            ok = bool(self._bindings or pending)
         else:
             ok = bool(self._name_row.get_text().strip())
         self._confirm_btn.set_sensitive(ok)
+
+    def _rebuild_bindings(self):
+        """Redraw one removable row per bound application."""
+        for row in self._bind_rows:
+            self._bind_group.remove(row)
+        self._bind_rows = []
+
+        for name in self._bindings:
+            row = Adw.ActionRow(title=name)
+            row.add_prefix(Gtk.Image.new_from_icon_name("application-x-executable-symbolic"))
+            rm = Gtk.Button(
+                icon_name="window-close-symbolic", valign=Gtk.Align.CENTER,
+                tooltip_text=f"Stop matching {name}",
+            )
+            rm.add_css_class("flat")
+            rm.connect("clicked", lambda _b, n=name: self._remove_binding(n))
+            row.add_suffix(rm)
+            self._bind_group.add(row)
+            self._bind_rows.append(row)
+
+        if not self._bindings:
+            empty = Adw.ActionRow(
+                title="No applications yet",
+                subtitle="Add one below, or pick from what is playing",
+            )
+            empty.set_sensitive(False)
+            self._bind_group.add(empty)
+            self._bind_rows.append(empty)
+
+        self._bind_group.add(self._add_row)
+        self._bind_rows.append(self._add_row)
+        self._bind_group.add(self._running_btn)
+        self._bind_rows.append(self._running_btn)
+
+        self._populate_running_menu()
+        self._sync_confirm()
+
+    def _populate_running_menu(self):
+        """List what is playing now, excluding names already bound."""
+        box = Gtk.Box(
+            orientation=Gtk.Orientation.VERTICAL, spacing=2,
+            margin_top=6, margin_bottom=6, margin_start=6, margin_end=6,
+        )
+        bound = {n.casefold() for n in self._bindings}
+        names = []
+        for stream in list_audio_streams():
+            for candidate in (stream.get("app_name"), stream.get("binary")):
+                if candidate and candidate.casefold() not in bound and candidate not in names:
+                    names.append(candidate)
+        if not names:
+            lbl = Gtk.Label(label="Nothing is playing", margin_top=6, margin_bottom=6)
+            lbl.add_css_class("dim-label")
+            box.append(lbl)
+        for name in names:
+            btn = Gtk.Button(label=name, halign=Gtk.Align.FILL)
+            btn.add_css_class("flat")
+            btn.connect("clicked", lambda _b, n=name: self._add_binding(n))
+            box.append(btn)
+        self._running_pop.set_child(box)
+
+    def _add_binding_from_entry(self):
+        text = self._add_row.get_text().strip()
+        if text:
+            self._add_row.set_text("")
+            self._add_binding(text)
+
+    def _add_binding(self, name):
+        if name.casefold() not in {n.casefold() for n in self._bindings}:
+            self._bindings.append(name)
+        self._running_pop.popdown()
+        self._rebuild_bindings()
+
+    def _remove_binding(self, name):
+        self._bindings = [n for n in self._bindings if n != name]
+        self._rebuild_bindings()
 
     def _on_icon_selected(self, flow):
         sel = flow.get_selected_children()
@@ -511,7 +606,12 @@ class AddSourceDialog(Adw.Dialog):
     def _on_confirm(self, _btn):
         # Read the field, not _selected_app: with manual entry the picker's
         # value is "" and the entry is the only source of truth.
-        app = self._app_row.get_text().strip() if self._app_row is not None else ""
+        if self._bindings is not None:
+            # Fold in anything still sitting in the entry, unconfirmed.
+            self._add_binding_from_entry()
+            app = ", ".join(self._bindings)
+        else:
+            app = ""
         if self._source is None and not app:
             return
         name = self._name_row.get_text().strip() or app
