@@ -13,6 +13,7 @@ existed carry no `kind` at all, and kind() reads those as app sources, so this
 file is never rewritten merely to add a discriminator.
 """
 
+import copy
 import json
 import os
 import uuid
@@ -39,6 +40,19 @@ def load():
     return data
 
 
+def load_seeded():
+    """Load the store, creating it from DEFAULT_SOURCES on first run.
+
+    An existing but empty file is respected: a user who has deleted every row
+    means it, and reseeding would put them all back on the next launch.
+    """
+    if not os.path.exists(CONFIG_PATH):
+        seeded = copy.deepcopy(DEFAULT_SOURCES)
+        save(seeded)
+        return seeded
+    return load()
+
+
 def save(sources):
     _atomic_write(CONFIG_PATH, sources)
 
@@ -59,6 +73,59 @@ def kind(source):
     store stays readable in both directions.
     """
     return (source or {}).get("kind") or KIND_APP
+
+
+# Seeded on first run so the matrix opens with a usable set of rows rather
+# than an empty grid. Every cell starts at zero, so a seeded row routes nothing
+# and moves no stream until a fader is raised -- they are suggestions, not
+# behaviour.
+#
+# Names are matched case-insensitively against a stream's application name,
+# node name and process binary, so one entry covers a program whose reported
+# name differs from its binary (Discord publishes "WEBRTC VoiceEngine" and runs
+# as "Discord"; a Proton game reports its own name under a wine binary).
+DEFAULT_SOURCES = {
+    "system": {
+        "id": "system", "name": "System", "icon_name": "preferences-system-symbolic",
+        "match_app_names": [
+            "gnome-shell", "GNOME Shell", "gsd-media-keys", "plasmashell",
+            "libcanberra", "canberra-gtk-play", "speech-dispatcher",
+            "xdg-desktop-portal", "notify-send",
+        ],
+    },
+    "game": {
+        "id": "game", "name": "Game", "icon_name": "applications-games-symbolic",
+        "match_app_names": [
+            "steam", "Steam", "steamwebhelper", "lutris", "heroic",
+            "wine64-preloader", "wine-preloader", "wine", "gamescope",
+            "RSI Launcher", "bottles", "Minecraft",
+        ],
+    },
+    "music": {
+        "id": "music", "name": "Music", "icon_name": "audio-x-generic-symbolic",
+        "match_app_names": [
+            "Spotify", "Tidal", "tidal-hifi", "Rhythmbox", "Lollypop",
+            "Amberol", "Clementine", "Strawberry", "Audacious", "Elisa",
+            "Deezer", "Feishin", "mpv", "VLC media player",
+        ],
+    },
+    "browser": {
+        "id": "browser", "name": "Browser", "icon_name": "web-browser-symbolic",
+        "match_app_names": [
+            "Firefox", "firefox", "LibreWolf", "Zen Browser", "zen",
+            "Chromium", "Google Chrome", "chrome", "Brave", "brave",
+            "Vivaldi", "Epiphany", "GNOME Web",
+        ],
+    },
+    "voice": {
+        "id": "voice", "name": "Voice", "icon_name": "system-users-symbolic",
+        "match_app_names": [
+            "Discord", "discord", "Vesktop", "vesktop", "WEBRTC VoiceEngine",
+            "TeamSpeak", "ts3client", "Mumble", "Element", "Signal",
+            "Telegram", "Zoom", "Slack",
+        ],
+    },
+}
 
 
 def bindings(source):

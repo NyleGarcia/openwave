@@ -62,7 +62,7 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         self._cell_debounce_ids = {}
         # One-shot re-read of the routing after a mix output change settles.
         self._output_refresh_id = None
-        self._sources = sources_module.load()
+        self._sources = sources_module.load_seeded()
         self._mixes = mixes_module.load_seeded()
 
         self._build_ui()
