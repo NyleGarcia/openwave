@@ -19,6 +19,8 @@ class MixMatrix(Gtk.Box):
         "add-source-clicked": (GObject.SignalFlags.RUN_FIRST, None, ()),
         "remove-source-clicked": (GObject.SignalFlags.RUN_FIRST, None, (str,)),
         "edit-source-clicked": (GObject.SignalFlags.RUN_FIRST, None, (str,)),
+        # (source_id, delta) -- -1 to move a row up, +1 to move it down
+        "move-source-clicked": (GObject.SignalFlags.RUN_FIRST, None, (str, int)),
         "add-mix-clicked": (GObject.SignalFlags.RUN_FIRST, None, ()),
         "rename-mix-clicked": (GObject.SignalFlags.RUN_FIRST, None, (str,)),
         "remove-mix-clicked": (GObject.SignalFlags.RUN_FIRST, None, (str,)),
@@ -53,6 +55,8 @@ class MixMatrix(Gtk.Box):
 
         self._mix_ids = []
         self._source_ids = []
+        # How each row was built, so reorder_sources can rebuild it verbatim.
+        self._source_specs = {}
         self._sources = {}
         self._headers = {}
         self._cells = {}
@@ -180,9 +184,18 @@ class MixMatrix(Gtk.Box):
                 "remove-clicked",
                 lambda _s, sid=source_id: self.emit("remove-source-clicked", sid),
             )
+        source.connect(
+            "move-clicked",
+            lambda _s, delta, sid=source_id: self.emit("move-source-clicked", sid, delta),
+        )
         self._grid.attach(source, 0, row, 1, 1)
         self._sources[source_id] = source
         self._source_ids.append(source_id)
+        # Remembered so reorder_sources can rebuild a row exactly as it was.
+        self._source_specs[source_id] = dict(
+            name=name, icon_name=icon_name, has_level=has_level,
+            removable=removable, editable=editable,
+        )
 
         for col_idx, mix_id in enumerate(self._mix_ids):
             cell = MixCell()
@@ -191,6 +204,36 @@ class MixMatrix(Gtk.Box):
 
         return source
 
+    def reorder_sources(self, order):
+        """Redraw the source rows in `order`.
+
+        Gtk.Grid has no row-move, so the rows are torn down and rebuilt. Every
+        MixCell is recreated, so the caller must re-wire the cells afterwards --
+        their widgets are new objects and carry no state.
+        """
+        specs = [(sid, self._source_specs[sid])
+                 for sid in order if sid in self._source_specs]
+        for _ in range(len(self._source_ids)):
+            self._grid.remove_row(1)     # row 0 is the header; rows shift up
+        self._source_ids = []
+        self._sources = {}
+        self._cells = {}
+        kept = dict(self._source_specs)
+        self._source_specs = {}
+        for sid, spec in specs:
+            self.add_source(sid, **spec)
+        self._source_specs.update({k: v for k, v in kept.items()
+                                   if k in self._source_specs})
+        self.refresh_move_buttons()
+
+    def refresh_move_buttons(self):
+        """Disable Up on the first row and Down on the last."""
+        last = len(self._source_ids) - 1
+        for idx, sid in enumerate(self._source_ids):
+            cell = self._sources.get(sid)
+            if cell is not None and hasattr(cell, "set_move_enabled"):
+                cell.set_move_enabled(idx > 0, idx < last)
+
     def remove_source(self, source_id):
         if source_id not in self._source_ids:
             return
@@ -198,6 +241,7 @@ class MixMatrix(Gtk.Box):
         self._grid.remove_row(idx + 1)
         self._source_ids.pop(idx)
         self._sources.pop(source_id, None)
+        self._source_specs.pop(source_id, None)
         for mix_id in self._mix_ids:
             self._cells.pop((source_id, mix_id), None)
 
@@ -501,6 +545,8 @@ class SourceCell(Gtk.Box):
         "volume-changed": (GObject.SignalFlags.RUN_FIRST, None, (float,)),
         "mute-toggled": (GObject.SignalFlags.RUN_FIRST, None, (bool,)),
         "remove-clicked": (GObject.SignalFlags.RUN_FIRST, None, ()),
+        # (delta) -- -1 to move this row up, +1 to move it down
+        "move-clicked": (GObject.SignalFlags.RUN_FIRST, None, (int,)),
         "edit-clicked": (GObject.SignalFlags.RUN_FIRST, None, ()),
     }
 
@@ -591,6 +637,24 @@ class SourceCell(Gtk.Box):
             inner.append(self._level)
 
         if editable:
+            up_btn = Gtk.Button(
+                icon_name="go-up-symbolic", valign=Gtk.Align.CENTER,
+                tooltip_text="Move up",
+            )
+            up_btn.add_css_class("flat")
+            up_btn.add_css_class("circular")
+            up_btn.connect("clicked", lambda _b: self.emit("move-clicked", -1))
+            self._up_btn = up_btn
+
+            down_btn = Gtk.Button(
+                icon_name="go-down-symbolic", valign=Gtk.Align.CENTER,
+                tooltip_text="Move down",
+            )
+            down_btn.add_css_class("flat")
+            down_btn.add_css_class("circular")
+            down_btn.connect("clicked", lambda _b: self.emit("move-clicked", 1))
+            self._down_btn = down_btn
+
             edit_btn = Gtk.Button(
                 icon_name="document-edit-symbolic",
                 valign=Gtk.Align.CENTER,
@@ -599,6 +663,8 @@ class SourceCell(Gtk.Box):
             edit_btn.add_css_class("flat")
             edit_btn.add_css_class("circular")
             edit_btn.connect("clicked", lambda _: self.emit("edit-clicked"))
+            inner.append(up_btn)
+            inner.append(down_btn)
             inner.append(edit_btn)
 
         if removable:
@@ -611,6 +677,13 @@ class SourceCell(Gtk.Box):
             remove_btn.add_css_class("circular")
             remove_btn.connect("clicked", lambda _: self.emit("remove-clicked"))
             inner.append(remove_btn)
+
+    def set_move_enabled(self, up, down):
+        """Grey the ends of the list rather than letting them do nothing."""
+        if getattr(self, "_up_btn", None) is not None:
+            self._up_btn.set_sensitive(up)
+        if getattr(self, "_down_btn", None) is not None:
+            self._down_btn.set_sensitive(down)
 
     def set_name(self, name):
         self._name_lbl.set_label(name)

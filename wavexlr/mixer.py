@@ -428,6 +428,16 @@ def claim_streams(sources, streams):
             key = (rank, str(source_id))
             if best_key is None or key < best_key:
                 best_key, best_id = key, source_id
+        if best_id is None:
+            # Nothing named it. A catch-all source takes what no other source
+            # claimed, so an application whose reported name matches no row
+            # still lands somewhere with a fader instead of bypassing the
+            # matrix entirely. Only ever a fallback: an explicit name always
+            # wins, and a stream is still owned exactly once.
+            best_id = next(
+                (sid for sid, src in sources.items() if src.get("catch_all")),
+                None,
+            )
         if best_id is not None:
             claims[best_id].add(stream_id)
     return claims

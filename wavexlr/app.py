@@ -5,6 +5,7 @@ gi.require_version('Gtk', '4.0')
 gi.require_version('Adw', '1')
 
 from gi.repository import Gtk, Adw, GLib, GObject, Gio, Gdk
+import json
 import logging
 import os
 import sys
@@ -45,8 +46,17 @@ def _slider_row(scale):
 
 class WaveXLRWindow(Adw.ApplicationWindow):
     def __init__(self, **kwargs):
-        super().__init__(**kwargs, title="OpenWave", default_width=1100, default_height=620)
-        self.set_size_request(900, 520)
+        # The old 1100x620 could not show its own content: the matrix alone
+        # needs 260 for the source column plus 228 per mix, and the sidebar
+        # another ~340, so three mixes overflowed the width by ~180px and the
+        # height ran out at the sixth row. Sized for three mixes and eight rows
+        # with headroom, then overridden by whatever size was last used.
+        super().__init__(**kwargs, title="OpenWave",
+                         default_width=1360, default_height=800)
+        # Kept modest so the window still fits a small screen; the matrix
+        # scrolls rather than being clipped.
+        self.set_size_request(820, 480)
+        self._restore_window_size()
         self.dev = WaveDevice()
         self._gain_max = 0x5000
         self._updating_ui = False
@@ -87,6 +97,53 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         self._start_meters()
         self._start_stream_poll()
         self._try_connect()
+
+    # Remembered across sessions: the right size depends on how many mixes and
+    # sources the user keeps, which only they know.
+    _WINDOW_STATE = os.path.expanduser("~/.config/openwave/window.json")
+
+    def _restore_window_size(self):
+        try:
+            with open(self._WINDOW_STATE) as f:
+                state = json.load(f)
+        except (OSError, ValueError):
+            return
+        if not isinstance(state, dict):
+            return
+        width, height = state.get("width"), state.get("height")
+        if isinstance(width, int) and isinstance(height, int) \
+                and width >= 820 and height >= 480:
+            self.set_default_size(width, height)
+        if state.get("maximized"):
+            self.maximize()
+
+    def _save_window_size(self):
+        """Store the current size. Never fatal: a window that cannot record
+        its geometry should still close."""
+        try:
+            os.makedirs(os.path.dirname(self._WINDOW_STATE), exist_ok=True)
+            state = {
+                "width": self.get_width(),
+                "height": self.get_height(),
+                "maximized": self.is_maximized(),
+            }
+            if state["maximized"]:
+                # get_width/height report the maximized size; keep the last
+                # restored size so unmaximizing does not snap to full screen.
+                previous = {}
+                try:
+                    with open(self._WINDOW_STATE) as f:
+                        previous = json.load(f)
+                except (OSError, ValueError):
+                    pass
+                state["width"] = previous.get("width", state["width"])
+                state["height"] = previous.get("height", state["height"])
+            tmp = self._WINDOW_STATE + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(state, f, indent=2)
+            os.replace(tmp, self._WINDOW_STATE)
+        except OSError:
+            pass
 
     def _build_ui(self):
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
@@ -186,6 +243,7 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         self.matrix.connect("add-source-clicked", self._on_add_source_clicked)
         self.matrix.connect("remove-source-clicked", self._on_remove_source_clicked)
         self.matrix.connect("edit-source-clicked", self._on_edit_source_clicked)
+        self.matrix.connect("move-source-clicked", self._on_move_source_clicked)
         self.matrix.connect("add-mix-clicked", self._on_add_mix_clicked)
         self.matrix.connect("rename-mix-clicked", self._on_rename_mix_clicked)
         self.matrix.connect("remove-mix-clicked", self._on_remove_mix_clicked)
@@ -945,6 +1003,18 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         self._refresh_source_meter(source["id"])
         self._refresh_mix_emptiness()
 
+    def _on_move_source_clicked(self, _matrix, source_id, delta):
+        before = list(self._sources)
+        self._sources = sources_module.reorder(self._sources, source_id, delta)
+        if list(self._sources) == before:
+            return                     # already at that end of the list
+        # Every MixCell is rebuilt by the reorder, so the cells must be wired
+        # again: the old widgets are gone and the new ones carry no state.
+        self.matrix.reorder_sources(list(self._sources))
+        self._wire_matrix_cells()
+        self._refresh_mix_emptiness()
+        self._start_meters()
+
     def _on_edit_source_clicked(self, _matrix, source_id):
         source = self._sources.get(source_id)
         if source is None:
@@ -1108,6 +1178,7 @@ class WaveXLRApp(Adw.Application):
         """Stop polling, drop the USB link, and tear down loopback + meter
         subprocesses before the process exits."""
         if self._window is not None:
+            self._window._save_window_size()
             self._window._stop_polling()
             if hasattr(self._window, "meter"):
                 self._window.meter.stop_all()

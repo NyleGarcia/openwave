@@ -86,7 +86,13 @@ def kind(source):
 # as "Discord"; a Proton game reports its own name under a wine binary).
 DEFAULT_SOURCES = {
     "system": {
-        "id": "system", "name": "System", "icon_name": "preferences-system-symbolic",
+        "id": "system", "name": "System",
+        "subtitle": "Anything not matched by another row",
+        "icon_name": "preferences-system-symbolic",
+        # Takes anything no other row claims, so a program nobody has named
+        # still gets a fader rather than slipping past the matrix. Listed names
+        # still win, so this only ever catches the remainder.
+        "catch_all": True,
         "match_app_names": [
             "gnome-shell", "GNOME Shell", "gsd-media-keys", "plasmashell",
             "libcanberra", "canberra-gtk-play", "speech-dispatcher",
@@ -195,6 +201,26 @@ def remove(sources, source_id):
     sources.pop(source_id, None)
     save(sources)
     return sources
+
+def reorder(sources, source_id, delta):
+    """Move a source `delta` places in the list, and persist the new order.
+
+    Insertion order is row order, so reordering means rebuilding the mapping.
+    Out-of-range moves are clamped rather than wrapping: a button at the end of
+    the list should do nothing, not jump the row to the other end.
+    """
+    order = list(sources)
+    if source_id not in order:
+        return sources
+    idx = order.index(source_id)
+    new_idx = max(0, min(len(order) - 1, idx + delta))
+    if new_idx == idx:
+        return sources
+    order.insert(new_idx, order.pop(idx))
+    reordered = {sid: sources[sid] for sid in order}
+    save(reordered)
+    return reordered
+
 
 def update(sources, source_id, **fields):
     """Edit a source in place, preserving its id.
