@@ -244,6 +244,12 @@ def _create_mix_sink_live(name, description):
         "media.class=Audio/Sink "
         "audio.position=[FL FR] "
         "object.linger=true "
+        # Without this a null sink's monitor is taken PRE-volume, so setting
+        # the sink's volume changes nothing downstream -- and at volume 0 the
+        # monitor was measured at full scale rather than silence. The generated
+        # config sets it on every mix sink; this path creates the same kind of
+        # node and must match, or a source's level slider does nothing.
+        "monitor.channel-volumes=true "
         "}"
     )
     try:

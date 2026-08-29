@@ -1121,7 +1121,10 @@ class Mixer:
             self._spawn_loopback(key, capture_node, mix_sink, node_name)
         node_id = _node_id_by_name(node_name)
         if node_id is not None:
-            _wpctl("set-volume", node_id, f"{volume:.3f}")
+            # cell fader x source trim: the row slider scales this source
+            # everywhere, the cell decides how much of it this mix gets.
+            _wpctl("set-volume", node_id,
+                   f"{volume * self._source_gain(source_id):.3f}")
             _wpctl("set-mute", node_id, "1" if muted else "0")
 
     def _reconcile_app_cell(self, source_id, mix_id, volume, muted):
@@ -1177,7 +1180,10 @@ class Mixer:
             self._spawn_loopback(key, intake, mix_sink, node_name)
         node_id = _node_id_by_name(node_name)
         if node_id is not None:
-            _wpctl("set-volume", node_id, f"{volume:.3f}")
+            # cell fader x source trim: the row slider scales this source
+            # everywhere, the cell decides how much of it this mix gets.
+            _wpctl("set-volume", node_id,
+                   f"{volume * self._source_gain(source_id):.3f}")
             _wpctl("set-mute", node_id, "1" if muted else "0")
 
     def _source_is_routed(self, source_id):
@@ -1213,13 +1219,29 @@ class Mixer:
         )
 
     def _do_apply_source_level(self, source_id):
+        """Re-apply every cell for this source, so the trim takes effect.
+
+        Deliberately NOT the intake sink's own volume. A null sink's monitor
+        does not follow it: measured, setting the sink to zero left the monitor
+        at full scale, because the pulse layer's flat-volume handling raises the
+        stream to compensate. The per-mix loopback volume is the one control
+        that demonstrably attenuates, so the trim multiplies into that.
+        """
         with self._lock:
-            source = dict(self._sources.get(source_id) or {})
-        node_id = _node_id_by_name(source_sink_name(source_id))
-        if node_id is None:
-            return          # not routed, so no intake to set
-        _wpctl("set-volume", node_id, f"{float(source.get('level', 1.0)):.3f}")
-        _wpctl("set-mute", node_id, "1" if source.get("muted") else "0")
+            mix_ids = list(self._mixes)
+        for mix_id in mix_ids:
+            self._reconcile_cell(source_id, mix_id)
+
+    def _source_gain(self, source_id):
+        """A source's trim: its level, or 0 while it is muted."""
+        with self._lock:
+            source = self._sources.get(source_id) or {}
+            if source.get("muted"):
+                return 0.0
+            try:
+                return max(0.0, min(1.0, float(source.get("level", 1.0))))
+            except (TypeError, ValueError):
+                return 1.0
 
     def _ensure_source_sink(self, source_id, description):
         """Create the source's intake sink if it is not already live."""
