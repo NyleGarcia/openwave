@@ -884,6 +884,12 @@ class MixCell(Gtk.Box):
         )
         self._pct_lbl = _percent_label()
         self._scale.add_css_class("openwave-mix-slider")
+
+        # A new cell routes nothing, so it starts muted and says so. Leaving it
+        # unmuted at 0% shows an armed-looking control that carries no audio.
+        with GObject.signal_handler_block(self._mute_btn, self._mute_handler):
+            self._mute_btn.set_active(True)
+        self._reflect_mute(True)
         self._scale_handler = self._scale.connect("value-changed", self._on_value_changed)
         inner.append(self._scale)
         inner.append(self._pct_lbl)
@@ -898,20 +904,36 @@ class MixCell(Gtk.Box):
         # The changed handler is blocked above, so the readout is updated here.
         self._sync_percent()
 
-    def set_muted(self, muted):
-        with GObject.signal_handler_block(self._mute_btn, self._mute_handler):
-            self._mute_btn.set_active(muted)
+    def _reflect_mute(self, muted):
         self._mute_icon.set_from_icon_name(
             "audio-volume-muted-symbolic" if muted else "audio-volume-high-symbolic"
         )
+        self._mute_btn.set_tooltip_text("Unmute" if muted else "Mute")
+        for widget in (self, self._mute_icon):
+            if muted:
+                widget.add_css_class("openwave-muted")
+            else:
+                widget.remove_css_class("openwave-muted")
+
+    def set_muted(self, muted):
+        with GObject.signal_handler_block(self._mute_btn, self._mute_handler):
+            self._mute_btn.set_active(muted)
+        self._reflect_mute(muted)
 
     def _on_value_changed(self, scale):
         self._sync_percent()
+        # A cell at zero and a muted cell mean the same thing, and letting them
+        # disagree produces a slider at 0% next to an unmuted icon, or a slider
+        # the user raises with no sound because a mute they forgot is still on.
+        should_mute = scale.get_value() <= 0.0
+        if should_mute != self._mute_btn.get_active():
+            with GObject.signal_handler_block(self._mute_btn, self._mute_handler):
+                self._mute_btn.set_active(should_mute)
+            self._reflect_mute(should_mute)
+            self.emit("mute-toggled", should_mute)
         self.emit("volume-changed", scale.get_value())
 
     def _on_mute_toggled(self, btn):
         muted = btn.get_active()
-        self._mute_icon.set_from_icon_name(
-            "audio-volume-muted-symbolic" if muted else "audio-volume-high-symbolic"
-        )
+        self._reflect_mute(muted)
         self.emit("mute-toggled", muted)
