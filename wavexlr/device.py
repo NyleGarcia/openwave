@@ -10,6 +10,8 @@ profiles.py; connect() picks the first supported device found.
 """
 
 import ctypes
+import glob
+import os
 import ctypes.util
 import re
 import struct
@@ -45,8 +47,48 @@ _ctx = ctypes.c_void_p()
 _lib.libusb_init(ctypes.byref(_ctx))
 
 
-def _find_card(matches):
-    """Find the ALSA card number for the device."""
+def _find_card(matches, vid=None, pid=None, usbbus=None):
+    """ALSA card number for a device.
+
+    Matched on /proc/asound/card*/usbid, which is the device's vid:pid, rather
+    than on names. Name matching was ambiguous the moment two Elgato devices
+    were connected: every profile's match list ends in "Elgato", so all three
+    resolved to whichever Elgato card came first, and OpenWave would read one
+    device over USB while driving the other's ALSA controls.
+
+    usbbus ("bus/device") disambiguates two of the SAME model, where vid:pid
+    alone cannot.
+    """
+    if vid is not None and pid is not None:
+        want = f"{vid:04x}:{pid:04x}"
+        for path in sorted(glob.glob("/proc/asound/card*/usbid")):
+            try:
+                with open(path) as f:
+                    if f.read().strip().lower() != want:
+                        continue
+                if usbbus is not None:
+                    bus_path = os.path.join(os.path.dirname(path), "usbbus")
+                    try:
+                        with open(bus_path) as f:
+                            if f.read().strip() != usbbus:
+                                continue
+                    except OSError:
+                        pass
+            except OSError:
+                continue
+            digits = "".join(c for c in os.path.basename(os.path.dirname(path))
+                             if c.isdigit())
+            if digits:
+                return digits
+
+        # A vid:pid was given and /proc/asound was readable, so "no match"
+        # means the device is not present -- not that we should guess. Falling
+        # through to the name match here is what made an absent Wave:3 resolve
+        # to a connected Dock, because every match list ends in "Elgato".
+        if glob.glob("/proc/asound/card*/usbid"):
+            return None
+
+    # Name matching only when /proc/asound is unreadable at all.
     try:
         r = subprocess.run(["aplay", "-l"], capture_output=True, text=True, timeout=3)
         for line in r.stdout.splitlines():
@@ -162,7 +204,9 @@ class WaveDevice:
             if handle:
                 self._handle = handle
                 self.profile = profile
-                self._card = _find_card(profile.card_match)
+                self._card = _find_card(
+                profile.card_match, vid=profile.vid, pid=profile.pid,
+            )
                 return
         raise RuntimeError("No supported Elgato Wave device found")
 

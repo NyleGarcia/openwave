@@ -1,5 +1,8 @@
 """Firmware-to-ALSA conversions for the Wave's own controls."""
 
+import os
+import shutil
+import tempfile
 import unittest
 
 from wavexlr import device
@@ -71,6 +74,53 @@ class ControlRanges(unittest.TestCase):
         finally:
             device._amixer = original
             device._ALSA_CTL_MAX.clear()
+
+
+if __name__ == "__main__":
+    unittest.main()
+
+
+class CardMatching(unittest.TestCase):
+    """Which ALSA card belongs to which USB device.
+
+    Name matching was ambiguous the moment two Elgato devices were connected:
+    every profile's match list ends in "Elgato", so all of them resolved to
+    whichever Elgato card came first, and OpenWave read one device over USB
+    while driving the other's ALSA controls.
+    """
+
+    def _fake_proc(self, cards):
+        """Write a throwaway /proc/asound-shaped tree. cards: {n: (usbid, usbbus)}"""
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        paths = []
+        for n, (usbid, usbbus) in cards.items():
+            d = os.path.join(tmp, f"card{n}")
+            os.makedirs(d)
+            with open(os.path.join(d, "usbid"), "w") as f:
+                f.write(usbid + "\n")
+            with open(os.path.join(d, "usbbus"), "w") as f:
+                f.write(usbbus + "\n")
+            paths.append(os.path.join(d, "usbid"))
+        real_glob = device.glob.glob
+        device.glob.glob = lambda pat: sorted(paths) if "usbid" in pat else []
+        self.addCleanup(setattr, device.glob, "glob", real_glob)
+
+    def test_each_device_resolves_to_its_own_card(self):
+        self._fake_proc({3: ("0fd9:00a6", "011/007"), 4: ("0fd9:007d", "001/036")})
+        self.assertEqual(device._find_card(("Elgato",), vid=0x0FD9, pid=0x007D), "4")
+        self.assertEqual(device._find_card(("Elgato",), vid=0x0FD9, pid=0x00A6), "3")
+
+    def test_an_absent_device_resolves_to_nothing(self):
+        # Not to whichever Elgato card happens to be present.
+        self._fake_proc({3: ("0fd9:00a6", "011/007")})
+        self.assertIsNone(device._find_card(("Elgato",), vid=0x0FD9, pid=0x0070))
+
+    def test_usbbus_separates_two_of_the_same_model(self):
+        self._fake_proc({3: ("0fd9:00a6", "011/007"), 5: ("0fd9:00a6", "002/004")})
+        self.assertEqual(
+            device._find_card(("Elgato",), vid=0x0FD9, pid=0x00A6, usbbus="002/004"),
+            "5")
 
 
 if __name__ == "__main__":
