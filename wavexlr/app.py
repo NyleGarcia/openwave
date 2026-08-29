@@ -26,6 +26,23 @@ logging.basicConfig(level=logging.INFO, format="%(name)s: %(message)s")
 KNOB_LABELS = {"gain": "Gain", "hp": "Headphones", "mix": "Monitor Mix"}
 
 
+def _slider_row(scale):
+    """Put a Gtk.Scale inside a PreferencesGroup card.
+
+    The scales were appended to the sidebar box rather than added to their
+    group, so they rendered below the whole card -- visually detached from the
+    row whose value they set, and ambiguous about which control they belonged
+    to.
+    """
+    row = Adw.PreferencesRow(activatable=False, selectable=False)
+    scale.set_margin_start(12)
+    scale.set_margin_end(12)
+    scale.set_margin_top(2)
+    scale.set_margin_bottom(6)
+    row.set_child(scale)
+    return row
+
+
 class WaveXLRWindow(Adw.ApplicationWindow):
     def __init__(self, **kwargs):
         super().__init__(**kwargs, title="OpenWave", default_width=1100, default_height=620)
@@ -54,6 +71,10 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         self.mixer.set_mixes(self._mixes)
         self.mixer.set_sources(self._sources)
         self.mixer.start()
+        # Re-evaluate now that mixer.hp is known: whether the capture fix is
+        # needed at all depends on the card exposing a playback side, and the
+        # first call above ran before the Mixer existed.
+        self._update_service_status()
         # The capture snapshot is seeded by _do_start on the worker. Priming
         # it here would put a 5-second-timeout pw-dump on the GTK thread during
         # window construction; capture_device_present is fail-open, so an
@@ -75,6 +96,27 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         self.status_label = Gtk.Label(label="Disconnected")
         self.status_label.add_css_class("dim-label")
         header.set_title_widget(self.status_label)
+
+        # Audio-service status. Packed at the start and hidden while healthy,
+        # so it costs nothing until it has something to say -- it used to be a
+        # whole PreferencesGroup carrying one row.
+        self.service_btn = Gtk.MenuButton(
+            icon_name="dialog-warning-symbolic", visible=False,
+        )
+        self.service_btn.add_css_class("flat")
+        service_pop = Gtk.Popover()
+        service_box = Gtk.Box(
+            orientation=Gtk.Orientation.VERTICAL, spacing=8,
+            margin_top=12, margin_bottom=12, margin_start=12, margin_end=12,
+        )
+        self.service_label = Gtk.Label(label="", xalign=0, wrap=True, max_width_chars=34)
+        service_box.append(self.service_label)
+        self.uninstall_btn = Gtk.Button(label="Uninstall capture fix")
+        self.uninstall_btn.connect("clicked", self._on_uninstall_clicked)
+        service_box.append(self.uninstall_btn)
+        service_pop.set_child(service_box)
+        self.service_btn.set_popover(service_pop)
+        header.pack_start(self.service_btn)
 
         refresh_btn = Gtk.Button(icon_name="view-refresh-symbolic", tooltip_text="Reconnect")
         refresh_btn.connect("clicked", lambda _: self._try_connect())
@@ -167,26 +209,7 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         self.split.set_sidebar(sidebar_scroll)
 
     def _build_device_pane(self, parent):
-        """Populate the right-hand column with Audio / Mic / HP / Device Info groups."""
-        # --- Audio fix status ---
-        status_group = Adw.PreferencesGroup(title="Audio")
-        parent.append(status_group)
-
-        self.audio_status_row = Adw.ActionRow(
-            title="Capture Fix",
-            subtitle="Keeps mic capture active to prevent the race condition"
-        )
-        self.audio_status_icon = Gtk.Image(icon_name="emblem-ok-symbolic")
-        self.audio_status_icon.add_css_class("dim-label")
-        self.audio_status_row.add_suffix(self.audio_status_icon)
-
-        self.uninstall_btn = Gtk.Button(icon_name="user-trash-symbolic", valign=Gtk.Align.CENTER, tooltip_text="Uninstall capture fix")
-        self.uninstall_btn.add_css_class("flat")
-        self.uninstall_btn.connect("clicked", self._on_uninstall_clicked)
-        self.audio_status_row.add_suffix(self.uninstall_btn)
-
-        status_group.add(self.audio_status_row)
-
+        """Populate the sidebar: Microphone, Headphones, and device info."""
         # --- Mic controls ---
         mic_group = Adw.PreferencesGroup(title="Microphone")
         parent.append(mic_group)
@@ -208,10 +231,8 @@ class WaveXLRWindow(Adw.ApplicationWindow):
             draw_value=False,
             adjustment=Gtk.Adjustment(lower=0x0000, upper=0x5000, step_increment=0x40, page_increment=0x200),
         )
-        self.gain_scale.set_margin_start(12)
-        self.gain_scale.set_margin_end(12)
         self.gain_scale.connect("value-changed", self._on_gain_changed)
-        parent.append(self.gain_scale)
+        mic_group.add(_slider_row(self.gain_scale))
 
         knob_row = Adw.ActionRow(title="Knob Controls", subtitle="What the physical knob adjusts")
         self.knob_label = Gtk.Label(label="Gain")
@@ -236,10 +257,8 @@ class WaveXLRWindow(Adw.ApplicationWindow):
             draw_value=False,
             adjustment=Gtk.Adjustment(lower=-60.0, upper=0.0, step_increment=0.5, page_increment=2.0),
         )
-        self.hp_scale.set_margin_start(12)
-        self.hp_scale.set_margin_end(12)
         self.hp_scale.connect("value-changed", self._on_hp_changed)
-        parent.append(self.hp_scale)
+        hp_group.add(_slider_row(self.hp_scale))
 
         lowz_row = Adw.SwitchRow(title="Low Impedance", subtitle="For low impedance headphones")
         lowz_row.connect("notify::active", self._on_lowz_changed)
@@ -262,57 +281,73 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         )
         self.mix_scale.set_margin_start(12)
         self.mix_scale.set_margin_end(12)
-        self.mix_scale.set_visible(False)
         self.mix_scale.connect("value-changed", self._on_mix_changed)
-        parent.append(self.mix_scale)
+        self.mix_scale_row = _slider_row(self.mix_scale)
+        self.mix_scale_row.set_visible(False)
+        hp_group.add(self.mix_scale_row)
 
         # Output routing is per mix and lives in each mix column's header
         # menu, not here — one device combo could only ever speak for one mix.
 
         # --- Device info ---
-        info_group = Adw.PreferencesGroup(title="Device Info")
+        # Titleless group so the expander reads as a single collapsed line: it
+        # is reference material, looked at once, and does not deserve a
+        # permanent three-row card in a narrow sidebar.
+        info_group = Adw.PreferencesGroup()
         parent.append(info_group)
+
+        info_expander = Adw.ExpanderRow(title="Device Info")
+        info_group.add(info_expander)
 
         self.fw_row = Adw.ActionRow(title="Firmware")
         self.fw_label = Gtk.Label(label="—")
         self.fw_label.add_css_class("dim-label")
         self.fw_row.add_suffix(self.fw_label)
-        info_group.add(self.fw_row)
+        info_expander.add_row(self.fw_row)
 
-        self.api_row = Adw.ActionRow(title="API Version")
+        self.api_row = Adw.ActionRow(title="API")
         self.api_label = Gtk.Label(label="—")
         self.api_label.add_css_class("dim-label")
         self.api_row.add_suffix(self.api_label)
-        info_group.add(self.api_row)
+        info_expander.add_row(self.api_row)
 
         self.serial_row = Adw.ActionRow(title="Serial")
         self.serial_label = Gtk.Label(label="—")
         self.serial_label.add_css_class("dim-label")
         self.serial_row.add_suffix(self.serial_label)
-        info_group.add(self.serial_row)
+        info_expander.add_row(self.serial_row)
 
     def _update_service_status(self):
-        """Check if the audio service is running."""
-        active = service.is_running()
+        """Reflect the audio service in the header, and only when it matters.
 
-        if active:
-            self.audio_status_icon.set_from_icon_name("emblem-ok-symbolic")
-            self.audio_status_icon.remove_css_class("dim-label")
-            self.audio_status_row.set_subtitle("Audio service running")
-            self.uninstall_btn.set_visible(True)
+        The capture fix works around a firmware race between playback and
+        capture on the same device. A card with no playback side cannot hit it,
+        so warning that the service is down is noise there -- which is the
+        normal state for anyone monitoring through a headset rather than the
+        Wave's own jack.
+        """
+        if service.is_running():
+            self.service_btn.set_visible(False)
+            return
+
+        needed = bool(getattr(self.mixer, "hp", None)) if hasattr(self, "mixer") else True
+        if not needed:
+            self.service_btn.set_visible(False)
+            return
+
+        if service.is_failed():
+            text = "The audio service failed to start."
+        elif service.is_installed():
+            text = "The audio service is installed but not running."
         else:
-            self.audio_status_icon.set_from_icon_name("dialog-warning-symbolic")
-            # Distinguish a service that never came up from one that is not
-            # installed at all: both leave the capture fix off, but only the
-            # first has anything to read in `journalctl --user -u openwave`.
-            if service.is_failed():
-                subtitle = "Audio service failed to start"
-            elif service.is_installed():
-                subtitle = "Audio service installed but not running"
-            else:
-                subtitle = "Audio service not running"
-            self.audio_status_row.set_subtitle(subtitle)
-            self.uninstall_btn.set_visible(False)
+            text = "The audio service is not running."
+        self.service_label.set_label(
+            text + " Without it the microphone can fall silent when playback "
+            "starts before capture."
+        )
+        self.uninstall_btn.set_visible(service.is_installed())
+        self.service_btn.set_tooltip_text(text)
+        self.service_btn.set_visible(True)
 
     def _on_uninstall_clicked(self, btn):
         dialog = Adw.AlertDialog(
@@ -410,7 +445,7 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         self.knob_row.set_visible(profile.has_vol_select)
         self.lowz_row.set_visible(profile.has_low_z)
         self.mix_row.set_visible(profile.has_monitor_mix)
-        self.mix_scale.set_visible(profile.has_monitor_mix)
+        self.mix_scale_row.set_visible(profile.has_monitor_mix)
         if profile.has_monitor_mix:
             self.mix_scale.get_adjustment().set_upper(profile.mix_max)
         self.mic_source.set_name(profile.display_name)
