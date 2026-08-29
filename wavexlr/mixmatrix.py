@@ -184,11 +184,13 @@ class MixMatrix(Gtk.Box):
             header.set_outputs(entries, current, summary, monitored)
 
     def add_source(self, source_id, *, name, icon_name, has_level=False,
-                   removable=False, editable=False, reorderable=False):
+                   removable=False, editable=False, reorderable=False,
+                   is_capture=False):
         row = len(self._source_ids) + 1
         source = SourceCell(
             name=name, icon_name=icon_name, has_level=has_level,
             removable=removable, editable=editable, reorderable=reorderable,
+            is_capture=is_capture,
         )
         if editable:
             source.connect(
@@ -213,6 +215,7 @@ class MixMatrix(Gtk.Box):
         self._source_specs[source_id] = dict(
             name=name, icon_name=icon_name, has_level=has_level,
             removable=removable, editable=editable, reorderable=reorderable,
+            is_capture=is_capture,
         )
 
         for col_idx, mix_id in enumerate(self._mix_ids):
@@ -611,7 +614,7 @@ class SourceCell(Gtk.Box):
     }
 
     def __init__(self, *, name, icon_name, has_level, removable=False,
-                 editable=False, reorderable=False):
+                 editable=False, reorderable=False, is_capture=False):
         super().__init__(
             orientation=Gtk.Orientation.HORIZONTAL,
             spacing=10,
@@ -619,6 +622,9 @@ class SourceCell(Gtk.Box):
         self.add_css_class("openwave-source-cell")
         self.add_css_class("card")
         self.set_size_request(400, 64)
+        # A microphone row is muted at the microphone, not at a speaker: the
+        # playback icons there read as "this output is silenced".
+        self._is_capture = is_capture
 
         inner = Gtk.Box(
             orientation=Gtk.Orientation.HORIZONTAL,
@@ -797,9 +803,21 @@ class SourceCell(Gtk.Box):
         self._reflect_mute_icon(muted)
 
     def _reflect_mute_icon(self, muted):
-        self._mute_icon.set_from_icon_name(
-            "audio-volume-muted-symbolic" if muted else "audio-volume-high-symbolic"
-        )
+        if getattr(self, "_is_capture", False):
+            icon = ("microphone-sensitivity-muted-symbolic" if muted
+                    else "audio-input-microphone-symbolic")
+        else:
+            icon = ("audio-volume-muted-symbolic" if muted
+                    else "audio-volume-high-symbolic")
+        self._mute_icon.set_from_icon_name(icon)
+        self._mute_btn.set_tooltip_text("Unmute" if muted else "Mute")
+        # A muted row should be obvious at a glance down the column, not a
+        # difference of one small icon.
+        for widget in (self, self._name_lbl, self._mute_icon):
+            if muted:
+                widget.add_css_class("openwave-muted")
+            else:
+                widget.remove_css_class("openwave-muted")
         if self._level is not None:
             if muted:
                 self._level.add_css_class("dim-label")

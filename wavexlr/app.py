@@ -246,6 +246,7 @@ class WaveXLRWindow(Adw.ApplicationWindow):
             "mic", name="Microphone",
             icon_name="audio-input-microphone-symbolic",
             has_level=True,
+            is_capture=True,
         )
         self.mic_source.connect("volume-changed", self._on_mic_matrix_volume_changed)
         self.mic_source.connect("mute-toggled", self._on_mic_matrix_mute_toggled)
@@ -260,6 +261,7 @@ class WaveXLRWindow(Adw.ApplicationWindow):
                 removable=True,
                 editable=True,
                 reorderable=True,
+                is_capture=sources_module.kind(source) == sources_module.KIND_DEVICE,
             )
             self._wire_source_row(source_id)
 
@@ -1030,6 +1032,7 @@ class WaveXLRWindow(Adw.ApplicationWindow):
             removable=True,
             editable=True,
             reorderable=True,
+            is_capture=sources_module.kind(source) == sources_module.KIND_DEVICE,
         )
         self._wire_source_row(source["id"])
         for mix_id in self._mixes:
