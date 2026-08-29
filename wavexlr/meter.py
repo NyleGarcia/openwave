@@ -7,6 +7,7 @@ GLib.idle_add. Independent of the loopback subprocess plumbing in mixer.py
 to keep concerns separate.
 """
 
+import json
 import os
 import struct
 import subprocess
@@ -41,6 +42,14 @@ class MeterMonitor:
                 [
                     "pw-cat", "--record",
                     "--target", source_node_name,
+                    # Labelled so a level tap is identifiable in a mixer or a
+                    # monitoring script. Unlabelled these appear as bare
+                    # "pw-cat" entries indistinguishable from anyone else's.
+                    "--properties", json.dumps({
+                        "node.name": f"openwave_meter_{source_id}",
+                        "node.description": f"OpenWave level meter ({source_id})",
+                        "application.name": "OpenWave",
+                    }),
                     "--rate", str(self.SAMPLE_RATE),
                     "--channels", "1",
                     "--format", "s16",

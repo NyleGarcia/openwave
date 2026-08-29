@@ -639,7 +639,8 @@ class Mixer:
 
     # ----- subprocess lifecycle -----
     def _spawn_loopback(self, key, capture_source_name, playback_target,
-                        node_name, detach=False, playback_extra=""):
+                        node_name, detach=False, playback_extra="",
+                        description=None):
         """Spawn a pw-loopback and *manually* link the capture side to
         `capture_source_name`'s output ports. We disable autoconnect on capture
         because the session manager will otherwise hijack the loopback by
@@ -658,16 +659,27 @@ class Mixer:
         if key in self._procs:
             return
         capture_node_name = f"{node_name}_cap"
+        # Both halves are labelled. Unlabelled they show up as
+        # "pw-loopback-542152" in every mixer and monitoring tool, which makes
+        # OpenWave's plumbing indistinguishable from anyone else's and
+        # impossible to filter on.
+        label = description or node_name
+        ident = f'application.name=OpenWave node.description="{label}" '
+        cap_ident = f'application.name=OpenWave node.description="{label} (capture)" '
+
         try:
             proc = subprocess.Popen(
                 [
                     "pw-loopback",
                     "--capture-props="
                     f"node.autoconnect=false node.name={capture_node_name} "
+                    + cap_ident +
                     "audio.channels=2 audio.position=[FL,FR]",
                     "--playback-props="
                     + (f"target.object={playback_target} " if playback_target else "")
-                    + f"node.name={node_name} " + playback_extra +
+                    + f"node.name={node_name} "
+                    + ("" if "node.description" in playback_extra else ident)
+                    + playback_extra +
                     "audio.channels=2 audio.position=[FL,FR]",
                 ],
                 stdout=subprocess.DEVNULL,
@@ -947,8 +959,10 @@ class Mixer:
         target = self.resolve_output(mix_id, sinks=sinks, default_sink=default_sink)
         if target is None:
             return
+        mix_name = (self._mixes.get(mix_id) or {}).get("name", mix_id)
         self._spawn_loopback(
             key, mix_sink, target, f"openwave_loop_out_{mix_id}", detach=True,
+            description=f"{mix_name} \u2192 output",
         )
 
     def _mix_source_node(self, sink):
@@ -1011,6 +1025,7 @@ class Mixer:
             if key not in self._procs:
                 self._spawn_loopback(
                     key, sink, None, node_name,
+                    description=f"{mix.get('name', mix_id)} (capture source)",
                     playback_extra=(
                         "media.class=Audio/Source priority.session=100 "
                         f'node.description="OpenWave {mix.get("name", mix_id)}" '
@@ -1197,7 +1212,14 @@ class Mixer:
             self._destroy_loopback(key)
             return
         if key not in self._procs:
-            self._spawn_loopback(key, capture_node, mix_sink, node_name)
+            with self._lock:
+                src_name = (self._sources.get(source_id) or {}).get(
+                    "name", "Microphone" if source_id == "mic" else source_id)
+                mix_name = (self._mixes.get(mix_id) or {}).get("name", mix_id)
+            self._spawn_loopback(
+                key, capture_node, mix_sink, node_name,
+                description=f"{src_name} \u2192 {mix_name}",
+            )
         node_id = _node_id_by_name(node_name)
         if node_id is not None:
             # cell fader x source trim: the row slider scales this source
@@ -1256,7 +1278,11 @@ class Mixer:
             self._destroy_loopback(key)
             return
         if key not in self._procs:
-            self._spawn_loopback(key, intake, mix_sink, node_name)
+            mix_name = (self._mixes.get(mix_id) or {}).get("name", mix_id)
+            self._spawn_loopback(
+                key, intake, mix_sink, node_name,
+                description=f"{source.get('name', source_id)} \u2192 {mix_name}",
+            )
         node_id = _node_id_by_name(node_name)
         if node_id is not None:
             # cell fader x source trim: the row slider scales this source
