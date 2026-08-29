@@ -1035,21 +1035,29 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         nodes.add(self.mixer.mic)
         return {node for node in nodes if node}
 
-    def _on_source_confirmed(self, _dialog, name, match_app_name, icon_name):
-        self._install_source(sources_module.new_source(
+    def _on_source_confirmed(self, _dialog, name, match_app_name, icon_name,
+                             group=""):
+        source = sources_module.new_source(
             name=name, match_app_name=match_app_name, icon_name=icon_name,
-        ))
+        )
+        if group:
+            source["group"] = group
+        self._install_source(source)
 
-    def _on_device_source_confirmed(self, _dialog, name, node_name, icon_name):
+    def _on_device_source_confirmed(self, _dialog, name, node_name, icon_name,
+                                    group=""):
         # Queue the re-snapshot before installing: the reconcile that
         # _install_source triggers refuses to wire a node the snapshot has not
         # seen, and the worker runs queued tasks in insertion order, so the
         # refresh lands first. Doing it synchronously would put a pw-dump on
         # the GTK thread in a click handler.
         self.mixer.request_capture_poll()
-        self._install_source(sources_module.new_device_source(
+        source = sources_module.new_device_source(
             name=name, node_name=node_name, icon_name=icon_name,
-        ))
+        )
+        if group:
+            source["group"] = group
+        self._install_source(source)
 
     def _install_source(self, source):
         """Persist a new source of either kind, give it a row, and wire it up."""
@@ -1191,7 +1199,35 @@ class WaveXLRWindow(Adw.ApplicationWindow):
     def _on_source_mute_toggled(self, _cell, muted, source_id):
         self.mixer.set_source_level(
             source_id, self._sources.get(source_id, {}).get("level", 1.0), muted)
+        if not muted:
+            self._enforce_exclusive_group(source_id)
         sources_module.save(self._sources)
+
+    def _enforce_exclusive_group(self, active_id):
+        """Leave only one source in a group unmuted.
+
+        Two microphones on one speaker is a normal setup -- a main and a
+        backup, or two positions -- and having both open at once gives comb
+        filtering rather than redundancy. A group makes switching between them
+        one click, while a second speaker's microphone sits in a different
+        group and is untouched. A global default-source switch cannot express
+        that; this is per-row.
+        """
+        active_group = sources_module.group(self._sources.get(active_id, {}))
+        if not active_group:
+            return
+        for sid, source in self._sources.items():
+            if sid == active_id:
+                continue
+            if sources_module.group(source) != active_group:
+                continue
+            if source.get("muted"):
+                continue
+            source["muted"] = True
+            self.mixer.set_source_level(sid, source.get("level", 1.0), True)
+            cell = self.matrix.source(sid)
+            if cell is not None:
+                cell.set_muted(True)
 
     def _on_move_source_clicked(self, _matrix, source_id, delta):
         before = list(self._sources)
@@ -1215,7 +1251,8 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         dialog.connect("source-edited", self._on_source_edited)
         dialog.present(self)
 
-    def _on_source_edited(self, _dialog, source_id, name, binding, icon_name):
+    def _on_source_edited(self, _dialog, source_id, name, binding, icon_name,
+                          group=""):
         if source_id not in self._sources:
             return  # removed while the dialog was open
         source = self._sources[source_id]
@@ -1229,7 +1266,7 @@ class WaveXLRWindow(Adw.ApplicationWindow):
 
         # sources_module.update, never new_source: the id is the prefix of every
         # "<source_id>.<mix_id>" cell key, so a fresh id would orphan the levels.
-        fields = {"name": name, "icon_name": icon_name}
+        fields = {"name": name, "icon_name": icon_name, "group": group}
         if not is_device:
             # A device's binding is its node_name, which the dialog shows but
             # does not offer to edit — it is picked from live hardware, and

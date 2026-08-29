@@ -172,6 +172,23 @@ def new_source(*, name, match_app_name, icon_name=DEFAULT_APP_ICON):
     }
 
 
+def group(source):
+    """The exclusivity group a source belongs to, or "" for none.
+
+    Sources sharing a group are mutually exclusive: unmuting one mutes the
+    others. Two microphones on one speaker -- a main and a backup -- want
+    exactly one of them live, while a second speaker's microphone is in a
+    different group (or none) and is unaffected.
+    """
+    value = (source or {}).get("group")
+    return str(value).strip() if value else ""
+
+
+def groups(sources):
+    """Every group name in use, for offering as suggestions."""
+    return sorted({group(s) for s in sources.values() if group(s)})
+
+
 def is_protected(source):
     """True for a row the user should not be able to delete.
 

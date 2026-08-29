@@ -155,3 +155,39 @@ class Reordering(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ExclusivityGroups(unittest.TestCase):
+    """Two microphones on one speaker want exactly one of them live.
+
+    A second speaker's microphone is in a different group, or none, and must
+    be unaffected -- which is the whole reason this is per-row rather than a
+    single global "active microphone".
+    """
+
+    def test_a_source_without_a_group_has_none(self):
+        self.assertEqual(sources.group({}), "")
+        self.assertEqual(sources.group({"group": ""}), "")
+        self.assertEqual(sources.group({"group": None}), "")
+
+    def test_whitespace_does_not_create_a_distinct_group(self):
+        self.assertEqual(sources.group({"group": "  Host  "}), "Host")
+
+    def test_groups_lists_what_is_in_use(self):
+        store = {
+            "a": {"group": "Host"}, "b": {"group": "Host"},
+            "c": {"group": "Guest"}, "d": {},
+        }
+        self.assertEqual(sources.groups(store), ["Guest", "Host"])
+
+    def test_a_podcast_layout_separates_the_speakers(self):
+        # Two mics on the host, one on the guest: muting across the host's
+        # pair must never reach the guest.
+        store = {
+            "host_main":   {"group": "Host"},
+            "host_backup": {"group": "Host"},
+            "guest":       {"group": "Guest"},
+        }
+        host = [k for k, v in store.items() if sources.group(v) == "Host"]
+        self.assertEqual(sorted(host), ["host_backup", "host_main"])
+        self.assertNotIn("guest", host)

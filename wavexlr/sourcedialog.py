@@ -39,13 +39,15 @@ ICON_CHOICES = (
 class AddSourceDialog(Adw.Dialog):
     __gsignals__ = {
         # (display_name, match_app_name, icon_name)
-        "source-confirmed": (GObject.SignalFlags.RUN_FIRST, None, (str, str, str)),
+        # (display_name, match_app_name, icon_name, group)
+        "source-confirmed": (GObject.SignalFlags.RUN_FIRST, None, (str, str, str, str)),
         # (display_name, capture_node_name, icon_name)
-        "device-source-confirmed": (GObject.SignalFlags.RUN_FIRST, None, (str, str, str)),
+        # (display_name, capture_node_name, icon_name, group)
+        "device-source-confirmed": (GObject.SignalFlags.RUN_FIRST, None, (str, str, str, str)),
         # (source_id, display_name, binding, icon_name). `binding` is the
         # match_app_name for an app source and "" for a device source, whose
         # node_name is hardware and is not editable here.
-        "source-edited": (GObject.SignalFlags.RUN_FIRST, None, (str, str, str, str)),
+        "source-edited": (GObject.SignalFlags.RUN_FIRST, None, (str, str, str, str, str)),
     }
 
     def __init__(self, source=None, *, exclude_nodes=()):
@@ -254,6 +256,7 @@ class AddSourceDialog(Adw.Dialog):
         self.emit(
             "device-source-confirmed",
             name, self._selected_device["name"], self._selected_icon,
+            self._group_text(),
         )
         self.close()
 
@@ -465,6 +468,16 @@ class AddSourceDialog(Adw.Dialog):
             dev_group.add(dev_row)
 
         # Icon picker
+        group_group = Adw.PreferencesGroup(
+            title="Group",
+            description="Sources sharing a group are mutually exclusive: "
+                        "unmuting one mutes the others. Leave blank for none.",
+        )
+        outer.append(group_group)
+        self._group_row = Adw.EntryRow(title="Group name")
+        self._group_row.set_text((self._source or {}).get("group", "") or "")
+        group_group.add(self._group_row)
+
         icon_group = Adw.PreferencesGroup(title="Icon")
         outer.append(icon_group)
 
@@ -598,6 +611,10 @@ class AddSourceDialog(Adw.Dialog):
         self._bindings = [n for n in self._bindings if n != name]
         self._rebuild_bindings()
 
+    def _group_text(self):
+        row = getattr(self, "_group_row", None)
+        return row.get_text().strip() if row is not None else ""
+
     def _on_icon_selected(self, flow):
         sel = flow.get_selected_children()
         if sel:
@@ -621,7 +638,8 @@ class AddSourceDialog(Adw.Dialog):
             # Carry the id so app.py routes this through sources.update() and
             # the row keeps its persisted per-mix levels.
             self.emit("source-edited", self._source["id"], name, app,
-                      self._selected_icon)
+                      self._selected_icon, self._group_text())
         else:
-            self.emit("source-confirmed", name, app, self._selected_icon)
+            self.emit("source-confirmed", name, app, self._selected_icon,
+                      self._group_text())
         self.close()
