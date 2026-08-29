@@ -15,7 +15,7 @@ from .meter import MeterMonitor
 from .mixer import Mixer, list_output_sinks, OUTPUT_AUTO
 from .mixmatrix import MixMatrix
 from .sourcedialog import AddSourceDialog
-from . import paths, setup, service, sources as sources_module
+from . import paths, setup, service, sources as sources_module, mixes as mixes_module
 
 logging.basicConfig(level=logging.INFO, format="%(name)s: %(message)s")
 
@@ -39,10 +39,12 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         # during a drag into one set_cell. {(source_id, mix_id): timeout_id}.
         self._cell_debounce_ids = {}
         self._sources = sources_module.load()
+        self._mixes = mixes_module.load_seeded()
 
         self._build_ui()
         self._update_service_status()
         self.mixer = Mixer()
+        self.mixer.set_mixes(self._mixes)
         self.mixer.set_sources(self._sources)
         self.mixer.start()
         self._refresh_outputs()
@@ -100,21 +102,13 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         self.matrix = MixMatrix()
         self.split.set_content(self.matrix)
 
-        self.matrix.add_mix(
-            "personal", title="Personal Mix",
-            subtitle="What you hear",
-            icon_name="audio-headphones-symbolic",
-        )
-        self.matrix.add_mix(
-            "chat", title="Chat Mix",
-            subtitle="To voice apps (v0.3.0)",
-            icon_name="system-users-symbolic",
-        )
-        self.matrix.add_mix(
-            "record", title="Record Mix",
-            subtitle="To OBS / recording (v0.3.0)",
-            icon_name="media-record-symbolic",
-        )
+        for mix_id, mix in self._mixes.items():
+            self.matrix.add_mix(
+                mix_id,
+                title=mix.get("name", mix_id),
+                subtitle=mix.get("subtitle", ""),
+                icon_name=mix.get("icon_name", mixes_module.DEFAULT_ICON),
+            )
 
         self.mic_source = self.matrix.add_source(
             "mic", name="Microphone",
@@ -573,7 +567,7 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         """Bind each per-cell slider/mute to the mixer + restore persisted levels."""
         source_ids = ["mic"] + list(self._sources.keys())
         for source_id in source_ids:
-            for mix_id in ("personal", "chat", "record"):
+            for mix_id in self._mixes:
                 self._wire_cell(source_id, mix_id)
 
     def _wire_cell(self, source_id, mix_id):
@@ -656,9 +650,8 @@ class WaveXLRWindow(Adw.ApplicationWindow):
             has_level=True,
             removable=True,
         )
-        self._wire_cell(source["id"], "personal")
-        self._wire_cell(source["id"], "chat")
-        self._wire_cell(source["id"], "record")
+        for mix_id in self._mixes:
+            self._wire_cell(source["id"], mix_id)
         self.mixer.set_sources(self._sources)
         self.mixer.poll_streams()
         self._refresh_app_meter(source["id"])

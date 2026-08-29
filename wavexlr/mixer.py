@@ -42,11 +42,6 @@ def _set_pdeathsig():
 
 CONFIG_PATH = os.path.expanduser("~/.config/openwave/mixes.json")
 
-MIX_SINKS = {
-    "personal": "openwave_personal_mix",
-    "chat":     "openwave_chat_mix",
-    "record":   "openwave_record_mix",
-}
 PERSONAL_MIX_SINK = "openwave_personal_mix"
 HP_LOOPBACK_KEY = "_personal_to_hp"
 HP_LOOPBACK_NODE = "openwave_loop_personal_to_hp"
@@ -242,7 +237,12 @@ class Mixer:
         self._procs = {}
         self._state = self._load_state()
         self._sources = {}
+        self._mixes = {}
         self._streams = {}
+        # _do_start ends with a full reconcile. Reconciling before it would
+        # route cells into sinks it has not yet created or swept, so
+        # set_sources/set_mixes stay silent until it has run once.
+        self._started = False
         self.mic, self.hp = find_wave_xlr_alsa()
 
         # Background worker: every operation that talks to pw-loopback /
@@ -479,7 +479,26 @@ class Mixer:
         """Update the app-source configuration; reconcile on worker."""
         with self._lock:
             self._sources = dict(sources)
-        self._enqueue(("set_sources",), self._reconcile_all)
+        self._push_reconcile()
+
+    def set_mixes(self, mixes):
+        """Update the mix configuration; reconcile on worker."""
+        with self._lock:
+            self._mixes = dict(mixes)
+        self._push_reconcile()
+
+    def _push_reconcile(self):
+        """Queue one reconcile pass, coalescing with any already pending.
+
+        set_sources and set_mixes share a key so configuring both at startup
+        costs one pass, not two.
+        """
+        if self._started:
+            self._enqueue(("reconcile",), self._reconcile_all)
+
+    def _mix_sink(self, mix_id):
+        """The PipeWire sink carrying a mix, or None if it is not defined."""
+        return (self._mixes.get(mix_id) or {}).get("sink")
 
     def remove_source(self, source_id):
         """Forget persisted cells now; tear down loopbacks on worker."""
@@ -513,6 +532,7 @@ class Mixer:
         self._respawn_output_loopback()
         with self._lock:
             self._streams = {s["id"]: s for s in list_audio_streams()}
+        self._started = True
         self._reconcile_all()
 
     def _respawn_output_loopback(self):
@@ -569,8 +589,15 @@ class Mixer:
 
     def _reconcile_all(self):
         self._reap_dead()
-        for source_id in (["mic"] + list(self._sources.keys())):
-            for mix_id in MIX_SINKS:
+        # Snapshot both axes under the lock: set_sources/set_mixes replace
+        # these dicts from the GTK thread, and a mutation mid-iteration would
+        # raise into _worker_loop's bare except, silently leaving a mix
+        # unwired.
+        with self._lock:
+            source_ids = ["mic"] + list(self._sources)
+            mix_ids = list(self._mixes)
+        for source_id in source_ids:
+            for mix_id in mix_ids:
                 self._reconcile_cell(source_id, mix_id)
 
     def _reconcile_cell(self, source_id, mix_id):
@@ -585,7 +612,7 @@ class Mixer:
     def _reconcile_mic_cell(self, mix_id, volume, muted):
         if not self.mic:
             return
-        mix_sink = MIX_SINKS.get(mix_id)
+        mix_sink = self._mix_sink(mix_id)
         if not mix_sink:
             return
         key = ("mic", mix_id)
@@ -604,7 +631,7 @@ class Mixer:
         source = self._sources.get(source_id)
         if not source:
             return
-        mix_sink = MIX_SINKS.get(mix_id)
+        mix_sink = self._mix_sink(mix_id)
         if not mix_sink:
             return
         match = source.get("match_app_name")
