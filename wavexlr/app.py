@@ -12,7 +12,7 @@ import threading
 
 from .device import WaveDevice
 from .meter import MeterMonitor
-from .mixer import Mixer
+from .mixer import Mixer, list_output_sinks, OUTPUT_AUTO
 from .mixmatrix import MixMatrix
 from .sourcedialog import AddSourceDialog
 from . import paths, setup, service, sources as sources_module
@@ -45,6 +45,7 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         self.mixer = Mixer()
         self.mixer.set_sources(self._sources)
         self.mixer.start()
+        self._refresh_outputs()
         self.meter = MeterMonitor()
         self._meter_targets = {}
         self._wire_matrix_cells()
@@ -253,6 +254,22 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         self.mix_scale.set_visible(False)
         self.mix_scale.connect("value-changed", self._on_mix_changed)
         parent.append(self.mix_scale)
+
+        # --- Personal Mix output ---
+        out_group = Adw.PreferencesGroup(
+            title="Personal Mix Output",
+            description="Where the Personal Mix is played back",
+        )
+        parent.append(out_group)
+
+        self._updating_outputs = False
+        self._output_names = []
+        self.output_row = Adw.ComboRow(title="Device")
+        self.output_model = Gtk.StringList()
+        self.output_row.set_model(self.output_model)
+        self.output_row.connect("notify::selected", self._on_output_changed)
+        out_group.add(self.output_row)
+        # Populated in __init__ once the Mixer exists; _build_ui() runs first.
 
         # --- Device info ---
         info_group = Adw.PreferencesGroup(title="Device Info")
@@ -467,6 +484,50 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         self._hp_timeout = None
         self._usb_async(lambda: self.dev.set_hp_volume_db(db), on_error=self._on_usb_error)
         return False
+
+    def _refresh_outputs(self):
+        """Rebuild the output picker from the live sink list."""
+        sinks = list_output_sinks()
+        current = self.mixer.get_output()
+        resolved = self.mixer.resolve_output()
+
+        auto_label = "Automatic"
+        if resolved:
+            desc = next(
+                (s["description"] for s in sinks if s["name"] == resolved), None,
+            )
+            if desc:
+                auto_label = f"Automatic \u2014 {desc}"
+
+        self._updating_outputs = True
+        try:
+            self.output_model.splice(0, self.output_model.get_n_items(), None)
+            self._output_names = [OUTPUT_AUTO]
+            self.output_model.append(auto_label)
+            for sink in sinks:
+                self.output_model.append(sink["description"])
+                self._output_names.append(sink["name"])
+            try:
+                index = self._output_names.index(current)
+            except ValueError:
+                index = 0
+            self.output_row.set_selected(index)
+        finally:
+            self._updating_outputs = False
+
+    def _on_output_changed(self, row, _param):
+        if self._updating_outputs:
+            return
+        index = row.get_selected()
+        if not 0 <= index < len(self._output_names):
+            return
+        self.mixer.set_output(self._output_names[index])
+        # Re-label "Automatic" once the mixer has resolved the new target.
+        GLib.timeout_add(400, self._refresh_outputs_once)
+
+    def _refresh_outputs_once(self):
+        self._refresh_outputs()
+        return GLib.SOURCE_REMOVE
 
     def _on_lowz_changed(self, row, _pspec):
         if self._updating_ui or not self.dev.connected:

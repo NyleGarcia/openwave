@@ -51,6 +51,11 @@ PERSONAL_MIX_SINK = "openwave_personal_mix"
 HP_LOOPBACK_KEY = "_personal_to_hp"
 HP_LOOPBACK_NODE = "openwave_loop_personal_to_hp"
 
+# Reserved key in mixes.json holding the Personal Mix's output device. Cell
+# keys are always "<source>.<mix>", so a bare word cannot collide with one.
+OUTPUT_STATE_KEY = "output"
+OUTPUT_AUTO = "auto"
+
 
 def _pactl_short(kind):
     try:
@@ -138,6 +143,60 @@ def _ports(direction_flag, node_name):
         return []
     prefix = f"{node_name}:"
     return [line.strip() for line in r.stdout.splitlines() if line.strip().startswith(prefix)]
+
+
+def list_output_sinks():
+    """Return [{name, description}, ...] of sinks the Personal Mix may feed.
+
+    Only sinks backed by a real device are eligible. Virtual sinks are
+    excluded because routing the mix into one risks a feedback loop, and not
+    only via our own mix sinks: a user's per-application virtual sinks
+    typically feed *into* the Personal Mix, so selecting one would close a
+    cycle. A hardware sink is a terminus and cannot. `device.id` is the
+    discriminator — null sinks and loopback sinks do not carry one.
+    """
+    import json as _json
+    try:
+        r = subprocess.run(["pw-dump"], capture_output=True, text=True, timeout=5)
+        if r.returncode != 0:
+            return []
+        objects = _json.loads(r.stdout)
+    except (FileNotFoundError, subprocess.SubprocessError, _json.JSONDecodeError):
+        return []
+
+    out = []
+    for obj in objects:
+        if obj.get("type") != "PipeWire:Interface:Node":
+            continue
+        props = (obj.get("info") or {}).get("props") or {}
+        if props.get("media.class") != "Audio/Sink":
+            continue
+        if props.get("device.id") is None:
+            continue
+        name = props.get("node.name", "")
+        if not name:
+            continue
+        try:
+            priority = int(props.get("priority.session", 0))
+        except (TypeError, ValueError):
+            priority = 0
+        out.append({
+            "name": name,
+            "description": props.get("node.description") or name,
+            "priority": priority,
+        })
+    out.sort(key=lambda sink: sink["description"].lower())
+    return out
+
+
+def _default_sink_name():
+    try:
+        r = subprocess.run(
+            ["pactl", "get-default-sink"], capture_output=True, text=True, timeout=3,
+        )
+    except (FileNotFoundError, subprocess.SubprocessError):
+        return None
+    return r.stdout.strip() or None
 
 
 def list_audio_streams():
@@ -248,7 +307,51 @@ class Mixer:
         )
 
     def cells(self):
-        return dict(self._state)
+        """Per-cell state only; reserved scalar keys are not cells."""
+        return {k: v for k, v in self._state.items() if "." in k}
+
+    def resolve_output(self):
+        """The sink the Personal Mix should feed, or None if nothing is eligible.
+
+        Explicit user choice first, then the Wave device's own headphone jack,
+        then the system default, then the highest-priority output. Each
+        candidate is checked against the live sink list, so a device that has
+        been unplugged, or a card profile that no longer exposes an output,
+        falls through instead of leaving the mix with no outlet.
+
+        The default-sink step usually does not fire: the Personal Mix is
+        typically *itself* the default sink, and it is not eligible. The
+        priority fallback is what makes the automatic setting resolve to
+        something audible on a machine whose Wave device has no usable
+        headphone output.
+        """
+        sinks = list_output_sinks()
+        eligible = {sink["name"] for sink in sinks}
+
+        choice = self._state.get(OUTPUT_STATE_KEY, OUTPUT_AUTO)
+        if choice and choice != OUTPUT_AUTO and choice in eligible:
+            return choice
+
+        if self.hp and self.hp in eligible:
+            return self.hp
+
+        default = _default_sink_name()
+        if default and default in eligible:
+            return default
+
+        if sinks:
+            return max(sinks, key=lambda sink: sink["priority"])["name"]
+        return None
+
+    def get_output(self):
+        """The persisted output choice: a sink name, or OUTPUT_AUTO."""
+        return self._state.get(OUTPUT_STATE_KEY, OUTPUT_AUTO)
+
+    def set_output(self, name):
+        """Persist the output choice and respawn the Personal->output loopback."""
+        self._state[OUTPUT_STATE_KEY] = name or OUTPUT_AUTO
+        self._save_state()
+        self._enqueue(("output",), self._do_retarget_output)
 
     def streams(self):
         """Snapshot of currently-known PipeWire output streams (id → info)."""
@@ -407,13 +510,23 @@ class Mixer:
     # ----- worker-side implementations -----
     def _do_start(self):
         self._sweep_stale_loopbacks()
-        if self.hp:
-            self._spawn_loopback(
-                HP_LOOPBACK_KEY, PERSONAL_MIX_SINK, self.hp, HP_LOOPBACK_NODE,
-            )
+        self._respawn_output_loopback()
         with self._lock:
             self._streams = {s["id"]: s for s in list_audio_streams()}
         self._reconcile_all()
+
+    def _respawn_output_loopback(self):
+        """(Re)create the Personal->output loopback for the current target."""
+        self._destroy_loopback(HP_LOOPBACK_KEY)
+        target = self.resolve_output()
+        if target is None:
+            return
+        self._spawn_loopback(
+            HP_LOOPBACK_KEY, PERSONAL_MIX_SINK, target, HP_LOOPBACK_NODE,
+        )
+
+    def _do_retarget_output(self):
+        self._respawn_output_loopback()
 
     def _do_remove_source(self, source_id):
         with self._lock:
