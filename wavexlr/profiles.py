@@ -32,6 +32,10 @@ class DeviceProfile:
     off_vol_select: int | None
     vol_select_map: dict
     off_low_z: int | None
+    # 48 V phantom power. 0x01 on, 0x00 off. Found by watching the config
+    # block while the dial was held on a Wave XLR: byte 6 flipped with the
+    # 48V LED and nothing else moved. None on a device with no XLR input.
+    off_phantom: int | None
     off_monitor_mix: int | None
     mix_max: int
     card_match: tuple
@@ -42,6 +46,10 @@ class DeviceProfile:
     @property
     def has_low_z(self):
         return self.off_low_z is not None
+
+    @property
+    def has_phantom(self):
+        return self.off_phantom is not None
 
     @property
     def has_vol_select(self):
@@ -81,6 +89,7 @@ WAVE_XLR = DeviceProfile(
     off_vol_select=14,
     vol_select_map={0x02: "hp"},
     off_low_z=33,
+    off_phantom=6,
     off_monitor_mix=None,
     mix_max=0,
     card_match=("Wave XLR", "Elgato"),
@@ -114,6 +123,7 @@ WAVE3 = DeviceProfile(
     off_vol_select=12,
     vol_select_map={0x01: "gain", 0x02: "hp", 0x03: "mix"},
     off_low_z=None,
+    off_phantom=None,
     off_monitor_mix=10,
     mix_max=0x6400,
     card_match=("Wave3", "Elgato"),

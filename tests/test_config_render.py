@@ -84,3 +84,33 @@ class DeviceProfiles(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PhantomPower(unittest.TestCase):
+    """48 V phantom, at config byte 6.
+
+    Found by watching the config block while the dial was held on a Wave XLR:
+    byte 6 flipped with the 48V LED and nothing else moved. Writing it was then
+    confirmed to move the LED, so it is a control and not a status mirror.
+    """
+
+    def test_devices_with_an_xlr_input_expose_it(self):
+        for pid in (0x007D, 0x00A6):
+            prof = next(p for p in profiles.PROFILES if p.pid == pid)
+            self.assertTrue(prof.has_phantom, prof.display_name)
+            self.assertEqual(prof.off_phantom, 6, prof.display_name)
+
+    def test_a_device_without_an_xlr_input_does_not(self):
+        # The Wave:3 is a microphone; there is nothing to power.
+        wave3 = next(p for p in profiles.PROFILES if p.pid == 0x0070)
+        self.assertFalse(wave3.has_phantom)
+        self.assertIsNone(wave3.off_phantom)
+
+    def test_it_does_not_collide_with_another_mapped_field(self):
+        # Byte 6 sits between mute (4) and headphone volume (9); a clash would
+        # mean toggling phantom silently moved something else.
+        prof = next(p for p in profiles.PROFILES if p.pid == 0x00A6)
+        others = {prof.off_gain, prof.off_gain + 1, prof.off_mute,
+                  prof.off_hp_vol, prof.off_hp_vol + 1, prof.off_vol_select,
+                  prof.off_low_z}
+        self.assertNotIn(prof.off_phantom, others)

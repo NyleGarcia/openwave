@@ -234,6 +234,12 @@ class WaveDevice:
         raw = struct.unpack_from(p.hp_fmt, self.read_config(), p.off_hp_vol)[0]
         return raw / p.hp_scale
 
+    def get_phantom(self):
+        """48 V phantom power state, or None on a device without it."""
+        if self.profile.off_phantom is None:
+            return None
+        return bool(self.read_config()[self.profile.off_phantom])
+
     def get_low_impedance(self):
         if self.profile.off_low_z is None:
             return None
@@ -313,6 +319,8 @@ class WaveDevice:
             state["volume_select"] = p.vol_select_map.get(config[p.off_vol_select], "gain")
         if p.off_low_z is not None:
             state["low_impedance"] = bool(config[p.off_low_z])
+        if p.off_phantom is not None:
+            state["phantom"] = bool(config[p.off_phantom])
         if p.off_monitor_mix is not None:
             state["monitor_mix"] = struct.unpack_from('<H', config, p.off_monitor_mix)[0]
         return state
@@ -349,6 +357,18 @@ class WaveDevice:
             self._last_fw["hp"] = raw
         if self._card and p.sync_alsa_hp:
             _alsa_set_hp_vol(self._card, _fw_hp_to_alsa(raw, p.hp_scale))
+
+    def set_phantom(self, enabled):
+        """Switch 48 V phantom power.
+
+        The only way to reach this on an XLR Dock, which has no controls at
+        all: on a Wave XLR the dial toggles it, on the dock nothing does.
+        """
+        if self.profile.off_phantom is None:
+            return
+        config = self.read_config()
+        config[self.profile.off_phantom] = 0x01 if enabled else 0x00
+        self.write_config(config)
 
     def set_low_impedance(self, enabled):
         if self.profile.off_low_z is None:
