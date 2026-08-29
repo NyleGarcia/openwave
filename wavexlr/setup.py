@@ -222,36 +222,42 @@ def list_sink_names(prefix=""):
     return names
 
 
-def create_null_sink(name, description):
+def create_null_sink(name, description, priority=None):
     """Public name for the null-sink creator: mixes are not its only user.
 
     Application sources need one each as a stream intake, and they are created
     on exactly the same terms -- object.linger is mandatory, because without it
     the node dies the moment pw-cli exits.
     """
-    _create_mix_sink_live(name, description)
+    _create_mix_sink_live(name, description, priority=priority)
 
 
-def _create_mix_sink_live(name, description):
+def _create_mix_sink_live(name, description, priority=None):
     """Spawn a null sink immediately so it appears without a PipeWire restart."""
     if _mix_sink_exists(name):
         return
-    args = (
-        "{ "
-        "factory.name=support.null-audio-sink "
-        f"node.name={name} "
-        "node.description=" + _spa_str(description) + " " 
-        "media.class=Audio/Sink "
-        "audio.position=[FL FR] "
-        "object.linger=true "
-        # Without this a null sink's monitor is taken PRE-volume, so setting
-        # the sink's volume changes nothing downstream -- and at volume 0 the
-        # monitor was measured at full scale rather than silence. The generated
-        # config sets it on every mix sink; this path creates the same kind of
-        # node and must match, or a source's level slider does nothing.
-        "monitor.channel-volumes=true "
-        "}"
-    )
+    props = [
+        "factory.name=support.null-audio-sink",
+        f"node.name={name}",
+        "node.description=" + _spa_str(description),
+        "media.class=Audio/Sink",
+        "audio.position=[FL FR]",
+        # Mandatory: without it the node dies the moment pw-cli exits.
+        "object.linger=true",
+        # Without this a null sink's monitor is taken PRE-volume, so the sink's
+        # volume changes nothing downstream -- measured, at volume 0 the
+        # monitor read full scale rather than silence. The generated config
+        # sets it on every mix sink; this path makes the same kind of node and
+        # must match, or a source's level slider does nothing.
+        "monitor.channel-volumes=true",
+    ]
+    if priority is not None:
+        # Session priority decides which sink the session manager picks as the
+        # system default. An intake sink is internal plumbing and must never
+        # win that election: as the default it swallows every application into
+        # one source row, at that row's send level.
+        props.append(f"priority.session={int(priority)}")
+    args = "{ " + " ".join(props) + " }"
     try:
         subprocess.run(
             ["pw-cli", "create-node", "adapter", args],

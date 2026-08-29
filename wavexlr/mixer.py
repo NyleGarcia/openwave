@@ -927,6 +927,7 @@ class Mixer:
     def _do_start(self):
         self._sweep_stale_loopbacks()
         self._sweep_orphan_source_sinks()
+        self._rescue_default_sink()
         self._respawn_mix_sources()
         self._respawn_all_output_loopbacks()
         with self._lock:
@@ -954,6 +955,32 @@ class Mixer:
         """<sink>_source -- the name the hand-written config used, so an
         application that has already selected it keeps working."""
         return f"{sink}_source"
+
+    def _rescue_default_sink(self):
+        """Move the system default off an intake sink if it landed there.
+
+        Intake sinks are internal, and a session manager choosing one as the
+        default sends every application into a single source row at that row's
+        send level -- audio does not stop, it goes quiet and lands in the wrong
+        place, which reads as "I cannot hear anything" with no obvious cause.
+        Observed after a PipeWire restart, when the mix sinks were not yet
+        present for the election.
+
+        priority.session=0 makes it unlikely; this makes it recoverable.
+        """
+        default = _default_sink_name()
+        if not default or not default.startswith(SOURCE_SINK_PREFIX):
+            return
+        with self._lock:
+            mixes = list(self._mixes.values())
+        target = next((m.get("sink") for m in mixes if m.get("sink")), None)
+        if target is None:
+            return
+        try:
+            subprocess.run(["pactl", "set-default-sink", target],
+                           capture_output=True, timeout=3)
+        except (FileNotFoundError, subprocess.SubprocessError):
+            return
 
     def _respawn_mix_sources(self):
         """Publish each mix as an ordinary capture source, and keep it linked.
@@ -1300,7 +1327,9 @@ class Mixer:
         from . import setup
         name = source_sink_name(source_id)
         try:
-            setup.create_null_sink(name, f"OpenWave: {description}")
+            setup.create_null_sink(
+                name, f"OpenWave: {description}", priority=0,
+            )
         except Exception:
             return None
         if source_id not in self._intakes:
