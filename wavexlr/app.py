@@ -12,7 +12,10 @@ import threading
 
 from .device import WaveDevice
 from .meter import MeterMonitor
-from .mixer import Mixer, list_output_sinks, OUTPUT_AUTO, OUTPUT_NONE
+from .mixer import (
+    Mixer, list_output_sinks, default_sink_name, OUTPUT_AUTO, OUTPUT_NONE,
+)
+from .mixdialog import MixDialog
 from .mixmatrix import MixMatrix
 from .sourcedialog import AddSourceDialog
 from . import paths, setup, service, sources as sources_module, mixes as mixes_module
@@ -38,6 +41,8 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         # Debounce slider events to coalesce a flurry of value-changed signals
         # during a drag into one set_cell. {(source_id, mix_id): timeout_id}.
         self._cell_debounce_ids = {}
+        # One-shot re-read of the routing after a mix output change settles.
+        self._output_refresh_id = None
         self._sources = sources_module.load()
         self._mixes = mixes_module.load_seeded()
 
@@ -130,6 +135,10 @@ class WaveXLRWindow(Adw.ApplicationWindow):
 
         self.matrix.connect("add-source-clicked", self._on_add_source_clicked)
         self.matrix.connect("remove-source-clicked", self._on_remove_source_clicked)
+        self.matrix.connect("add-mix-clicked", self._on_add_mix_clicked)
+        self.matrix.connect("rename-mix-clicked", self._on_rename_mix_clicked)
+        self.matrix.connect("remove-mix-clicked", self._on_remove_mix_clicked)
+        self.matrix.connect("mix-output-changed", self._on_mix_output_changed)
 
         # --- Sidebar: device controls -----------------------------------------
         sidebar_scroll = Gtk.ScrolledWindow(
@@ -249,21 +258,8 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         self.mix_scale.connect("value-changed", self._on_mix_changed)
         parent.append(self.mix_scale)
 
-        # --- Personal Mix output ---
-        out_group = Adw.PreferencesGroup(
-            title="Personal Mix Output",
-            description="Where the Personal Mix is played back",
-        )
-        parent.append(out_group)
-
-        self._updating_outputs = False
-        self._output_names = []
-        self.output_row = Adw.ComboRow(title="Device")
-        self.output_model = Gtk.StringList()
-        self.output_row.set_model(self.output_model)
-        self.output_row.connect("notify::selected", self._on_output_changed)
-        out_group.add(self.output_row)
-        # Populated in __init__ once the Mixer exists; _build_ui() runs first.
+        # Output routing is per mix and lives in each mix column's header
+        # menu, not here — one device combo could only ever speak for one mix.
 
         # --- Device info ---
         info_group = Adw.PreferencesGroup(title="Device Info")
@@ -479,65 +475,180 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         self._usb_async(lambda: self.dev.set_hp_volume_db(db), on_error=self._on_usb_error)
         return False
 
-    def _primary_mix_id(self):
-        """The mix the device-pane picker controls."""
-        if "personal" in self._mixes:
-            return "personal"
-        return next(iter(self._mixes), None)
-
-    def _refresh_outputs(self):
-        """Rebuild the output picker from the live sink list."""
-        mix_id = self._primary_mix_id()
-        if mix_id is None:
-            return
-        sinks = list_output_sinks()
+    # ----- per-mix output routing (shown in each column header's menu) -----
+    def _output_entries(self, mix_id, sinks, default_sink):
+        """(entries, current, summary, monitored) for one mix's header menu."""
         current = self.mixer.get_output(mix_id)
-        resolved = self.mixer.resolve_output(mix_id, sinks=sinks)
+        resolved = self.mixer.resolve_output(
+            mix_id, sinks=sinks, default_sink=default_sink,
+        )
+        descriptions = {sink["name"]: sink["description"] for sink in sinks}
 
         auto_label = "Automatic"
-        if resolved:
-            desc = next(
-                (s["description"] for s in sinks if s["name"] == resolved), None,
+        if current == OUTPUT_AUTO and resolved in descriptions:
+            # Only name the device when Automatic is what is actually in force:
+            # with an explicit sink chosen, resolve_output returns that sink,
+            # and labelling Automatic with it would claim a resolution that is
+            # not the one Automatic would pick.
+            auto_label = f"Automatic — {descriptions[resolved]}"
+
+        # Automatic stays first: it is the entry that describes the default
+        # behaviour, and a mix with no stored choice lands on it.
+        entries = [(OUTPUT_AUTO, auto_label), (OUTPUT_NONE, "Not monitored")]
+        entries += [(sink["name"], sink["description"]) for sink in sinks]
+        if current not in [name for name, _ in entries]:
+            # A remembered device that is currently absent: show it rather than
+            # silently substituting a sentinel.
+            entries.append((current, f"{current} (unavailable)"))
+
+        if current == OUTPUT_NONE:
+            summary, monitored = "Not monitored", False
+        elif resolved is None:
+            summary, monitored = "No output", False
+        else:
+            summary, monitored = descriptions.get(resolved, resolved), True
+        return entries, current, summary, monitored
+
+    def _refresh_outputs(self):
+        """Push the live sink list into every mix header's output menu."""
+        sinks = list_output_sinks()
+        default_sink = default_sink_name()
+        for mix_id in self._mixes:
+            entries, current, summary, monitored = self._output_entries(
+                mix_id, sinks, default_sink,
             )
-            if desc:
-                auto_label = f"Automatic \u2014 {desc}"
+            self.matrix.set_mix_outputs(
+                mix_id, entries, current, summary, monitored,
+            )
 
-        self._updating_outputs = True
-        try:
-            self.output_model.splice(0, self.output_model.get_n_items(), None)
-            # Automatic stays at index 0: the not-found fallback below selects
-            # index 0, and that must describe what the audio is actually doing.
-            self._output_names = [OUTPUT_AUTO, OUTPUT_NONE]
-            self.output_model.append(auto_label)
-            self.output_model.append("Not monitored")
-            for sink in sinks:
-                self.output_model.append(sink["description"])
-                self._output_names.append(sink["name"])
-            if current not in self._output_names:
-                # A remembered device that is currently absent: show it rather
-                # than silently substituting a sentinel.
-                self.output_model.append(f"{current} (unavailable)")
-                self._output_names.append(current)
-            self.output_row.set_selected(self._output_names.index(current))
-        finally:
-            self._updating_outputs = False
+    def _on_mix_output_changed(self, _matrix, mix_id, name):
+        self.mixer.set_output(mix_id, name)
+        # Re-label "Automatic — <device>" once the mixer has retargeted the
+        # loopback. A burst of changes collapses into one refresh.
+        if self._output_refresh_id is not None:
+            GLib.source_remove(self._output_refresh_id)
+        self._output_refresh_id = GLib.timeout_add(400, self._refresh_outputs_tick)
 
-    def _on_output_changed(self, row, _param):
-        if self._updating_outputs:
-            return
-        index = row.get_selected()
-        if not 0 <= index < len(self._output_names):
-            return
-        mix_id = self._primary_mix_id()
-        if mix_id is None:
-            return
-        self.mixer.set_output(mix_id, self._output_names[index])
-        # Re-label "Automatic" once the mixer has resolved the new target.
-        GLib.timeout_add(400, self._refresh_outputs_once)
-
-    def _refresh_outputs_once(self):
+    def _refresh_outputs_tick(self):
+        self._output_refresh_id = None
         self._refresh_outputs()
         return GLib.SOURCE_REMOVE
+
+    # ----- mix create / rename / delete -----
+    def _on_add_mix_clicked(self, _matrix):
+        dialog = MixDialog(
+            heading="Add Mix", confirm_label="Add Mix",
+            name="", icon_name=mixes_module.DEFAULT_ICON,
+        )
+        dialog.connect("mix-confirmed", self._on_mix_created)
+        dialog.present(self)
+
+    def _on_mix_created(self, _dialog, name, icon_name):
+        mix = mixes_module.new_mix(name=name, icon_name=icon_name)
+        self._mixes = mixes_module.add(self._mixes, mix)
+        self.matrix.add_mix(
+            mix["id"],
+            title=mix["name"],
+            subtitle=mix.get("subtitle", ""),
+            icon_name=mix["icon_name"],
+        )
+        for source_id in ["mic"] + list(self._sources):
+            self._wire_cell(source_id, mix["id"])
+        # install_mixes shells out to pw-cli/pactl for seconds at a time, so it
+        # runs off the main thread; the mixer is told about the mix only once
+        # the sink it would route into actually exists.
+        self._usb_async(
+            lambda defs=dict(self._mixes): setup.install_mixes(defs),
+            on_done=self._on_mix_installed,
+            on_error=self._on_mix_install_failed,
+        )
+
+    def _on_mix_installed(self, _ok):
+        self.mixer.set_mixes(self._mixes)
+        self._refresh_outputs()
+
+    def _on_mix_install_failed(self, exc):
+        """Register the mix anyway, and say that its sink is missing.
+
+        The mixer must learn about the mix whether or not the sink was
+        created: without this the column is drawn and persisted while every
+        cell in it stays silently inert for the rest of the session, with
+        nothing shown to explain why. _mix_sink() still resolves, so the cells
+        reconcile as soon as the sink appears.
+        """
+        logging.error("Failed to install mix sinks: %s", exc)
+        self.mixer.set_mixes(self._mixes)
+        self._refresh_outputs()
+
+    def _on_rename_mix_clicked(self, _matrix, mix_id):
+        mix = self._mixes.get(mix_id)
+        if mix is None:
+            return
+        dialog = MixDialog(
+            heading="Rename Mix", confirm_label="Save",
+            name=mix.get("name", ""),
+            icon_name=mix.get("icon_name", mixes_module.DEFAULT_ICON),
+        )
+        dialog.connect("mix-confirmed", self._on_mix_renamed, mix_id)
+        dialog.present(self)
+
+    def _on_mix_renamed(self, _dialog, name, icon_name, mix_id):
+        if mix_id not in self._mixes:
+            return
+        # Name and icon only. mixes.update already refuses id and sink, and
+        # leaving `description` alone keeps the node.description PipeWire
+        # publishes in step with the sink OBS or Discord is already bound to —
+        # which is the whole reason a rename is safe.
+        self._mixes = mixes_module.update(
+            self._mixes, mix_id, name=name, icon_name=icon_name,
+        )
+        self.matrix.set_mix(mix_id, title=name, icon_name=icon_name)
+        self.mixer.set_mixes(self._mixes)
+        # Renders byte-identical config (sink and description are untouched),
+        # so this only re-asserts that the sink is live. Still off the main
+        # thread, because proving that costs a pactl round trip.
+        self._usb_async(lambda defs=dict(self._mixes): setup.install_mixes(defs))
+
+    def _on_remove_mix_clicked(self, _matrix, mix_id):
+        if len(self._mixes) <= 1:
+            return  # the header control is already insensitive; belt and braces
+        mix = self._mixes.get(mix_id)
+        if mix is None:
+            return
+        name = mix.get("name", "this mix")
+        description = mix.get("description") or mix.get("sink", "")
+        dialog = Adw.AlertDialog(
+            heading="Delete mix?",
+            body=f"“{name}” and its levels for every source are deleted, "
+                 f"and the “{description}” audio device disappears. "
+                 f"Anything recording or listening to it — OBS, Discord — "
+                 f"loses that input until it is pointed somewhere else.",
+        )
+        dialog.add_response("cancel", "Cancel")
+        dialog.add_response("delete", "Delete")
+        dialog.set_response_appearance("delete", Adw.ResponseAppearance.DESTRUCTIVE)
+        dialog.set_default_response("cancel")
+        dialog.choose(
+            self, None, lambda d, r: self._on_remove_mix_response(d, r, mix_id),
+        )
+
+    def _on_remove_mix_response(self, dialog, result, mix_id):
+        if dialog.choose_finish(result) != "delete":
+            return
+        if mix_id not in self._mixes:
+            return
+        # A slider left mid-drag has a pending _flush_cell_volume timeout that
+        # would call set_cell and resurrect the very keys remove_mix purges.
+        for key in [k for k in self._cell_debounce_ids if k[1] == mix_id]:
+            GLib.source_remove(self._cell_debounce_ids.pop(key))
+        # Column first, so nothing can drive a mix that is going away; then the
+        # mixer, which captures the sink name before dropping the definition and
+        # on its worker tears every loopback down before destroying the sink;
+        # then the definition and the generated config catch up.
+        self.matrix.remove_mix(mix_id)
+        self.mixer.remove_mix(mix_id)
+        self._mixes = mixes_module.remove(self._mixes, mix_id)
+        self._usb_async(lambda defs=dict(self._mixes): setup.install_mixes(defs))
 
     def _on_lowz_changed(self, row, _pspec):
         if self._updating_ui or not self.dev.connected:

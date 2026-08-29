@@ -200,6 +200,16 @@ def _default_sink_name():
     return r.stdout.strip() or None
 
 
+def default_sink_name():
+    """The system default sink's node.name, or None.
+
+    Public wrapper so a caller resolving several mixes at once can pay for the
+    `pactl get-default-sink` call once and hand it to resolve_output, instead
+    of resolve_output re-running it per mix.
+    """
+    return _default_sink_name()
+
+
 def list_audio_streams():
     """Return [{id, app_name, media_name, node_name}, ...] for active output streams."""
     import json as _json
@@ -344,7 +354,15 @@ class Mixer:
         return {k: v for k, v in self._state.items() if "." in k}
 
     def _default_output_for(self, mix_id):
-        return OUTPUT_AUTO if mix_id == _MONITORING_MIX_ID else OUTPUT_NONE
+        """Only the first mix monitors by default.
+
+        Keying this to the literal id "personal" was safe while the built-in
+        mixes could not be removed. They can be now, and deleting that one
+        would otherwise leave nothing monitored by default. Insertion order is
+        column order, so the first mix is the leftmost one.
+        """
+        first = next(iter(self._mixes), None) or _MONITORING_MIX_ID
+        return OUTPUT_AUTO if mix_id == first else OUTPUT_NONE
 
     def get_output(self, mix_id):
         """The persisted choice for a mix: a sink name, OUTPUT_AUTO or OUTPUT_NONE."""
@@ -568,6 +586,33 @@ class Mixer:
             lambda sid=source_id: self._do_remove_source(sid),
         )
 
+    def remove_mix(self, mix_id):
+        """Forget a mix: purge its persisted state now, tear its audio down
+        on the worker.
+
+        The sink name is read here, before the definition is dropped, because
+        the worker needs it to destroy the live node and _mix_sink() would
+        already return None by the time the task runs.
+        """
+        with self._lock:
+            sink = self._mix_sink(mix_id)
+            # Cell keys are exactly "<source>.<mix>" — split rather than match a
+            # suffix so a source id that happens to end in the mix id survives.
+            for cell_key in [
+                k for k in self._state
+                if "." in k and k.rsplit(".", 1)[1] == mix_id
+            ]:
+                del self._state[cell_key]
+            outputs = self._state.get(OUTPUTS_STATE_KEY)
+            if isinstance(outputs, dict):
+                outputs.pop(mix_id, None)
+            self._save_state()
+            self._mixes.pop(mix_id, None)
+        self._enqueue(
+            ("remove_mix", mix_id),
+            lambda mid=mix_id, snk=sink: self._do_remove_mix(mid, snk),
+        )
+
     def poll_streams(self):
         """Refresh the active-stream cache; reconcile on worker if anything moved.
 
@@ -626,6 +671,29 @@ class Mixer:
             ]
         for k in keys:
             self._destroy_loopback(k)
+
+    def _do_remove_mix(self, mix_id, sink_name):
+        """Worker-side: every loopback touching the mix, then the sink itself.
+
+        Order matters. Destroying the sink while loopbacks still feed it leaves
+        those pw-loopback children alive and reconnecting against a node that
+        no longer exists, so they go first.
+
+        Every proc key is shaped ("output", mix), ("mic", mix) or
+        (source, mix, stream) — the mix id is index 1 in all three.
+        """
+        with self._lock:
+            keys = [
+                k for k in self._procs
+                if isinstance(k, tuple) and len(k) >= 2 and k[1] == mix_id
+            ]
+        for key in keys:
+            self._destroy_loopback(key)
+        if sink_name:
+            # Deferred: keeps mixer's module-level imports free of setup, which
+            # already reaches back into this package the same way.
+            from . import setup as setup_module
+            setup_module.destroy_mix_sink(sink_name)
 
     @staticmethod
     def _sweep_stale_loopbacks():

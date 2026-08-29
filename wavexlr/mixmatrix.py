@@ -9,7 +9,7 @@ import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Gtk, Adw, GObject  # noqa: E402
+from gi.repository import Gtk, Adw, GObject, Pango  # noqa: E402
 
 
 class MixMatrix(Gtk.Box):
@@ -18,7 +18,16 @@ class MixMatrix(Gtk.Box):
     __gsignals__ = {
         "add-source-clicked": (GObject.SignalFlags.RUN_FIRST, None, ()),
         "remove-source-clicked": (GObject.SignalFlags.RUN_FIRST, None, (str,)),
+        "add-mix-clicked": (GObject.SignalFlags.RUN_FIRST, None, ()),
+        "rename-mix-clicked": (GObject.SignalFlags.RUN_FIRST, None, (str,)),
+        "remove-mix-clicked": (GObject.SignalFlags.RUN_FIRST, None, (str,)),
+        # (mix_id, output name — a sink node.name, OUTPUT_AUTO or OUTPUT_NONE)
+        "mix-output-changed": (GObject.SignalFlags.RUN_FIRST, None, (str, str)),
     }
+
+    # Shown instead of deleting the only mix. The matrix's whole geometry is
+    # sources × mixes; with no column left there is nothing to route into.
+    LAST_MIX_REASON = "OpenWave needs at least one mix."
 
     def __init__(self):
         super().__init__(orientation=Gtk.Orientation.VERTICAL)
@@ -44,15 +53,19 @@ class MixMatrix(Gtk.Box):
         self._mix_ids = []
         self._source_ids = []
         self._sources = {}
+        self._headers = {}
         self._cells = {}
 
         corner = Gtk.Box()
         corner.set_size_request(260, 64)
         self._grid.attach(corner, 0, 0, 1, 1)
 
-        # "+ Add Source" trailing affordance, lives below the grid
+        # "+ Add Source" / "+ Add Mix" trailing affordances, below the grid.
+        # The mix button sits here rather than in a trailing grid column so
+        # that adding and removing columns never has to renumber it.
         add_row = Gtk.Box(
             orientation=Gtk.Orientation.HORIZONTAL,
+            spacing=6,
             margin_start=12, margin_end=12, margin_bottom=12,
         )
         wrapper.append(add_row)
@@ -65,11 +78,84 @@ class MixMatrix(Gtk.Box):
         self._add_btn.connect("clicked", lambda _: self.emit("add-source-clicked"))
         add_row.append(self._add_btn)
 
+        self._add_mix_btn = Gtk.Button(
+            label="+ Add Mix",
+            halign=Gtk.Align.START,
+        )
+        self._add_mix_btn.add_css_class("openwave-add-mix")
+        self._add_mix_btn.set_size_request(220, -1)
+        self._add_mix_btn.connect("clicked", lambda _: self.emit("add-mix-clicked"))
+        add_row.append(self._add_mix_btn)
+
     def add_mix(self, mix_id, *, title, subtitle, icon_name):
+        if mix_id in self._mix_ids:
+            return self._headers[mix_id]
         col = len(self._mix_ids) + 1
         header = MixHeaderCell(title=title, subtitle=subtitle, icon_name=icon_name)
+        header.connect(
+            "output-changed",
+            lambda _h, name, mid=mix_id: self.emit("mix-output-changed", mid, name),
+        )
+        header.connect(
+            "rename-clicked", lambda _h, mid=mix_id: self.emit("rename-mix-clicked", mid),
+        )
+        header.connect(
+            "remove-clicked", lambda _h, mid=mix_id: self.emit("remove-mix-clicked", mid),
+        )
         self._grid.attach(header, col, 0, 1, 1)
         self._mix_ids.append(mix_id)
+        self._headers[mix_id] = header
+
+        # A mix added after the rows exist still needs a cell in every row.
+        for row_idx, source_id in enumerate(self._source_ids):
+            cell = MixCell()
+            self._grid.attach(cell, col, row_idx + 1, 1, 1)
+            self._cells[(source_id, mix_id)] = cell
+
+        self._sync_delete_sensitivity()
+        return header
+
+    def remove_mix(self, mix_id):
+        if mix_id not in self._mix_ids:
+            return
+        idx = self._mix_ids.index(mix_id)
+        # Column mirror of remove_source's remove_row: Gtk.Grid shifts every
+        # column to the right of this one left by one, so the list index of the
+        # remaining mixes stays exactly their grid column minus one.
+        self._grid.remove_column(idx + 1)
+        self._mix_ids.pop(idx)
+        self._headers.pop(mix_id, None)
+        for source_id in self._source_ids:
+            self._cells.pop((source_id, mix_id), None)
+        self._sync_delete_sensitivity()
+
+    def _sync_delete_sensitivity(self):
+        """Grey out Delete on every header while only one mix is left."""
+        enabled = len(self._mix_ids) > 1
+        for header in self._headers.values():
+            header.set_delete_enabled(enabled, self.LAST_MIX_REASON)
+
+    def set_mix(self, mix_id, *, title=None, subtitle=None, icon_name=None):
+        """Live-update a header's identity after a rename."""
+        header = self._headers.get(mix_id)
+        if header is None:
+            return
+        if title is not None:
+            header.set_title(title)
+        if subtitle is not None:
+            header.set_subtitle(subtitle)
+        if icon_name is not None:
+            header.set_icon(icon_name)
+
+    def set_mix_outputs(self, mix_id, entries, current, summary, monitored=True):
+        """Refresh one header's output chooser and the routing it displays.
+
+        `entries` is [(output name, label), ...] in menu order; `current` is
+        the persisted choice; `summary` is the short text shown on the header.
+        """
+        header = self._headers.get(mix_id)
+        if header is not None:
+            header.set_outputs(entries, current, summary, monitored)
 
     def add_source(self, source_id, *, name, icon_name, has_level=False, removable=False):
         row = len(self._source_ids) + 1
@@ -111,7 +197,18 @@ class MixMatrix(Gtk.Box):
 
 
 class MixHeaderCell(Gtk.Box):
-    """Column header at the top of each mix."""
+    """Column header at the top of each mix: identity, routing, and its menu.
+
+    The menu is a Gtk.Popover of ordinary widgets rather than a Gio.Menu: the
+    output list changes with the hardware and differs per mix, and a Gio.Menu
+    would mean installing and tearing down a set of Gio actions per column.
+    """
+
+    __gsignals__ = {
+        "output-changed": (GObject.SignalFlags.RUN_FIRST, None, (str,)),
+        "rename-clicked": (GObject.SignalFlags.RUN_FIRST, None, ()),
+        "remove-clicked": (GObject.SignalFlags.RUN_FIRST, None, ()),
+    }
 
     def __init__(self, *, title, subtitle, icon_name):
         super().__init__(
@@ -120,36 +217,235 @@ class MixHeaderCell(Gtk.Box):
         )
         self.add_css_class("openwave-mix-header")
         self.add_css_class("card")
-        self.set_size_request(220, 64)
+        # Taller than the 64px data cells because a third line — the live
+        # output — is worth seeing without opening the menu. Only row 0 grows;
+        # the corner box beside it simply stretches to match.
+        self.set_size_request(220, 78)
+
+        self._updating = False
+        self._current_output = None
 
         inner = Gtk.Box(
             orientation=Gtk.Orientation.HORIZONTAL,
             spacing=10,
             margin_start=14,
-            margin_end=14,
-            margin_top=10,
-            margin_bottom=10,
+            margin_end=6,
+            margin_top=8,
+            margin_bottom=8,
             hexpand=True,
         )
         self.append(inner)
 
-        icon = Gtk.Image.new_from_icon_name(icon_name)
-        icon.set_pixel_size(22)
-        inner.append(icon)
+        self._icon = Gtk.Image.new_from_icon_name(icon_name)
+        self._icon.set_pixel_size(22)
+        inner.append(self._icon)
 
         text = Gtk.Box(
-            orientation=Gtk.Orientation.VERTICAL, spacing=2, hexpand=True, valign=Gtk.Align.CENTER
+            orientation=Gtk.Orientation.VERTICAL, spacing=1, hexpand=True,
+            valign=Gtk.Align.CENTER,
         )
         inner.append(text)
 
-        title_lbl = Gtk.Label(label=title, xalign=0)
-        title_lbl.add_css_class("heading")
-        text.append(title_lbl)
+        # max_width_chars is what actually caps the label: an ellipsizing GTK
+        # label still requests its full natural width without it, and
+        # set_size_request(220, …) is a minimum, so a long user-typed name
+        # would otherwise stretch the whole column. width_chars pins the
+        # natural width to the same value so every column comes out identical
+        # regardless of how long or short its name happens to be.
+        self._title_lbl = Gtk.Label(label=title, xalign=0)
+        self._title_lbl.set_ellipsize(Pango.EllipsizeMode.END)
+        self._title_lbl.set_width_chars(14)
+        self._title_lbl.set_max_width_chars(14)
+        self._title_lbl.add_css_class("heading")
+        self._title_lbl.set_tooltip_text(title)
+        text.append(self._title_lbl)
 
-        subtitle_lbl = Gtk.Label(label=subtitle, xalign=0)
-        subtitle_lbl.add_css_class("dim-label")
-        subtitle_lbl.add_css_class("caption")
-        text.append(subtitle_lbl)
+        self._subtitle_lbl = Gtk.Label(label=subtitle, xalign=0)
+        self._subtitle_lbl.set_ellipsize(Pango.EllipsizeMode.END)
+        self._subtitle_lbl.set_width_chars(16)
+        self._subtitle_lbl.set_max_width_chars(16)
+        self._subtitle_lbl.add_css_class("dim-label")
+        self._subtitle_lbl.add_css_class("caption")
+        self._subtitle_lbl.set_visible(bool(subtitle))
+        text.append(self._subtitle_lbl)
+
+        # Hidden until the app has resolved the routing, so the header never
+        # shows a placeholder that reads like a real device.
+        self._out_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        self._out_box.set_visible(False)
+        text.append(self._out_box)
+
+        self._out_icon = Gtk.Image.new_from_icon_name("audio-speakers-symbolic")
+        self._out_icon.set_pixel_size(12)
+        self._out_icon.add_css_class("dim-label")
+        self._out_box.append(self._out_icon)
+
+        self._out_lbl = Gtk.Label(label="", xalign=0, hexpand=True)
+        self._out_lbl.set_ellipsize(Pango.EllipsizeMode.END)
+        self._out_lbl.set_width_chars(16)
+        self._out_lbl.set_max_width_chars(16)
+        self._out_lbl.add_css_class("dim-label")
+        self._out_lbl.add_css_class("caption")
+        self._out_box.append(self._out_lbl)
+
+        self._menu_btn = Gtk.MenuButton(
+            icon_name="view-more-symbolic",
+            valign=Gtk.Align.CENTER,
+            tooltip_text="Output, rename, delete",
+        )
+        self._menu_btn.add_css_class("flat")
+        self._menu_btn.add_css_class("circular")
+        self._menu_btn.set_popover(self._build_popover())
+        inner.append(self._menu_btn)
+
+    # ----- popover -----
+    @staticmethod
+    def _menu_row_button(icon_name, label, label_css=None):
+        btn = Gtk.Button(hexpand=True)
+        btn.add_css_class("flat")
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        row.append(Gtk.Image.new_from_icon_name(icon_name))
+        lbl = Gtk.Label(label=label, xalign=0, hexpand=True)
+        if label_css:
+            lbl.add_css_class(label_css)
+        row.append(lbl)
+        btn.set_child(row)
+        return btn
+
+    def _build_popover(self):
+        pop = Gtk.Popover()
+        box = Gtk.Box(
+            orientation=Gtk.Orientation.VERTICAL, spacing=8,
+            margin_start=8, margin_end=8, margin_top=8, margin_bottom=8,
+        )
+        box.set_size_request(272, -1)
+        pop.set_child(box)
+
+        heading = Gtk.Label(label="Output", xalign=0)
+        heading.add_css_class("heading")
+        box.append(heading)
+
+        scroll = Gtk.ScrolledWindow(
+            hscrollbar_policy=Gtk.PolicyType.NEVER,
+            vscrollbar_policy=Gtk.PolicyType.AUTOMATIC,
+            propagate_natural_height=True,
+            max_content_height=260,
+        )
+        box.append(scroll)
+
+        self._out_list = Gtk.ListBox(selection_mode=Gtk.SelectionMode.SINGLE)
+        self._out_list.add_css_class("boxed-list")
+        self._out_list.connect("row-selected", self._on_output_row_selected)
+        scroll.set_child(self._out_list)
+
+        box.append(Gtk.Separator())
+
+        rename_btn = self._menu_row_button("document-edit-symbolic", "Rename Mix…")
+        rename_btn.connect("clicked", self._on_rename_clicked)
+        box.append(rename_btn)
+
+        # The tooltip hangs off a sensitive wrapper as well as the button:
+        # an insensitive GTK4 widget is skipped by picking and never gets the
+        # motion event that would show its own tooltip.
+        self._delete_wrap = Gtk.Box()
+        box.append(self._delete_wrap)
+        self._delete_btn = self._menu_row_button(
+            "user-trash-symbolic", "Delete Mix", label_css="error",
+        )
+        self._delete_btn.connect("clicked", self._on_delete_clicked)
+        self._delete_wrap.append(self._delete_btn)
+
+        # Belt and braces for the tooltip: a disabled button with no visible
+        # explanation reads as a bug.
+        self._delete_hint = Gtk.Label(label="", xalign=0, wrap=True, visible=False)
+        self._delete_hint.add_css_class("dim-label")
+        self._delete_hint.add_css_class("caption")
+        box.append(self._delete_hint)
+
+        return pop
+
+    def _popdown(self):
+        pop = self._menu_btn.get_popover()
+        if pop is not None:
+            pop.popdown()
+
+    def _on_output_row_selected(self, _box, row):
+        if self._updating or row is None:
+            return
+        name = getattr(row, "_output_name", None)
+        # GTK re-emits row-selected when the popover is first mapped, because
+        # the selection made on the unrealised list is re-applied then. Compare
+        # against the value we last displayed rather than trusting the signal:
+        # re-picking the current output is a no-op either way.
+        if name is None or name == self._current_output:
+            return
+        self._current_output = name
+        self._popdown()
+        self.emit("output-changed", name)
+
+    def _on_rename_clicked(self, _btn):
+        self._popdown()
+        self.emit("rename-clicked")
+
+    def _on_delete_clicked(self, _btn):
+        self._popdown()
+        self.emit("remove-clicked")
+
+    # ----- setters -----
+    def set_title(self, title):
+        self._title_lbl.set_label(title)
+        self._title_lbl.set_tooltip_text(title)
+
+    def set_subtitle(self, subtitle):
+        self._subtitle_lbl.set_label(subtitle or "")
+        self._subtitle_lbl.set_visible(bool(subtitle))
+
+    def set_icon(self, icon_name):
+        self._icon.set_from_icon_name(icon_name)
+
+    def set_outputs(self, entries, current, summary, monitored=True):
+        """Rebuild the chooser. `entries` is [(output name, label), ...]."""
+        self._updating = True
+        try:
+            child = self._out_list.get_first_child()
+            while child is not None:
+                nxt = child.get_next_sibling()
+                self._out_list.remove(child)
+                child = nxt
+            selected = None
+            for name, label in entries:
+                row = Gtk.ListBoxRow()
+                lbl = Gtk.Label(
+                    label=label, xalign=0,
+                    margin_start=12, margin_end=12, margin_top=8, margin_bottom=8,
+                )
+                lbl.set_ellipsize(Pango.EllipsizeMode.END)
+                lbl.set_max_width_chars(28)
+                row.set_child(lbl)
+                row._output_name = name  # noqa: SLF001
+                self._out_list.append(row)
+                if name == current:
+                    selected = row
+            if selected is not None:
+                self._out_list.select_row(selected)
+            self._current_output = current
+        finally:
+            self._updating = False
+
+        self._out_lbl.set_label(summary)
+        self._out_lbl.set_tooltip_text(summary)
+        self._out_icon.set_from_icon_name(
+            "audio-speakers-symbolic" if monitored else "audio-volume-muted-symbolic"
+        )
+        self._out_box.set_visible(True)
+
+    def set_delete_enabled(self, enabled, reason=""):
+        self._delete_btn.set_sensitive(enabled)
+        tip = None if enabled else (reason or None)
+        self._delete_btn.set_tooltip_text(tip)
+        self._delete_wrap.set_tooltip_text(tip)
+        self._delete_hint.set_label(reason or "")
+        self._delete_hint.set_visible(not enabled)
 
 
 class SourceCell(Gtk.Box):
