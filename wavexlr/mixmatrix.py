@@ -537,6 +537,19 @@ class SourceCell(Gtk.Box):
 
     def set_name(self, name):
         self._name_lbl.set_label(name)
+    def set_available(self, available, *, reason="Device not connected"):
+        """Dim the row when the device behind it is gone.
+
+        The controls stay live on purpose: the level is persisted whether or
+        not the device is present, so one set while a headset is off takes
+        effect the moment it comes back.
+        """
+        if available:
+            self._name_lbl.remove_css_class("dim-label")
+            self.set_tooltip_text(None)
+        else:
+            self._name_lbl.add_css_class("dim-label")
+            self.set_tooltip_text(reason)
 
     def set_volume(self, value):
         """Update the master slider without firing the changed signal."""

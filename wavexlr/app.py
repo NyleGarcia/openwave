@@ -35,6 +35,7 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         self._last_state = None
         self._poll_id = None
         self._stream_poll_id = None
+        self._device_poll_countdown = self._DEVICE_POLL_EVERY
         self._gain_timeout = None
         self._hp_timeout = None
         self._mix_timeout = None
@@ -52,6 +53,10 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         self.mixer.set_mixes(self._mixes)
         self.mixer.set_sources(self._sources)
         self.mixer.start()
+        # The capture snapshot is seeded by _do_start on the worker. Priming
+        # it here would put a 5-second-timeout pw-dump on the GTK thread during
+        # window construction; capture_device_present is fail-open, so an
+        # unseeded snapshot draws rows live rather than dead in the meantime.
         self._refresh_outputs()
         self.meter = MeterMonitor()
         self._meter_targets = {}
@@ -713,10 +718,24 @@ class WaveXLRWindow(Adw.ApplicationWindow):
             GLib.source_remove(self._stream_poll_id)
         self._stream_poll_id = GLib.timeout_add_seconds(2, self._stream_poll_tick)
 
+    # Capture devices change orders of magnitude less often than streams and
+    # finding out costs its own pw-dump, so check every third stream tick
+    # (~6 s) rather than adding a second timer with its own teardown.
+    _DEVICE_POLL_EVERY = 3
+
     def _stream_poll_tick(self):
         self.mixer.poll_streams()
-        for source_id in list(self._sources.keys()):
-            self._refresh_app_meter(source_id)
+        self._device_poll_countdown -= 1
+        check_devices = self._device_poll_countdown <= 0
+        if check_devices:
+            self._device_poll_countdown = self._DEVICE_POLL_EVERY
+            self.mixer.request_capture_poll()
+        for source_id, source in list(self._sources.items()):
+            if sources_module.kind(source) == sources_module.KIND_DEVICE:
+                if check_devices:
+                    self._refresh_device_meter(source_id, source)
+            else:
+                self._refresh_app_meter(source_id)
         return True
 
     def _start_meters(self):
@@ -727,7 +746,48 @@ class WaveXLRWindow(Adw.ApplicationWindow):
                 lambda level: self._set_source_level("mic", level),
             )
         for source_id in self._sources.keys():
+            self._refresh_source_meter(source_id)
+
+    def _refresh_source_meter(self, source_id):
+        """Point a source's meter at whatever currently carries its audio."""
+        source = self._sources.get(source_id)
+        if not source:
+            return
+        if sources_module.kind(source) == sources_module.KIND_DEVICE:
+            self._refresh_device_meter(source_id, source)
+        else:
             self._refresh_app_meter(source_id)
+
+    def _refresh_device_meter(self, source_id, source):
+        """Meter a capture device straight off its node, as the mic row does.
+
+        There is no stream to follow — the node *is* the audio — so this is the
+        same call _start_meters makes for self.mixer.mic, and meter.py needs no
+        change to serve it.
+
+        _meter_targets holds a node name for a device source where it holds a
+        stream id for an app source. The two never meet: a value is only ever
+        compared against another value for the same source_id.
+        """
+        node_name = source.get("node_name")
+        present = self.mixer.capture_device_present(node_name)
+        cell = self.matrix.source(source_id)
+        if cell is not None:
+            cell.set_available(present, reason="Capture device not connected")
+        if not present:
+            # Stop rather than leave pw-cat holding a device that has gone, and
+            # zero the bar so it does not freeze on its last value.
+            if self._meter_targets.pop(source_id, None) is not None:
+                self.meter.stop(source_id)
+                self._set_source_level(source_id, 0.0)
+            return
+        if self._meter_targets.get(source_id) == node_name:
+            return  # already metering this node
+        self.meter.start(
+            source_id, node_name,
+            lambda level, sid=source_id: self._set_source_level(sid, level),
+        )
+        self._meter_targets[source_id] = node_name
 
     def _refresh_app_meter(self, source_id):
         """Re-point the meter at the first currently-matching stream, or stop it
@@ -761,14 +821,41 @@ class WaveXLRWindow(Adw.ApplicationWindow):
             cell.set_level(level)
 
     def _on_add_source_clicked(self, _matrix):
-        dialog = AddSourceDialog()
+        dialog = AddSourceDialog(exclude_nodes=self._bound_capture_nodes())
         dialog.connect("source-confirmed", self._on_source_confirmed)
+        dialog.connect("device-source-confirmed", self._on_device_source_confirmed)
         dialog.present(self)
 
+    def _bound_capture_nodes(self):
+        """Capture nodes that already have a row, so the picker cannot make a
+        duplicate. The Wave's own mic is in the set: it is the built-in row,
+        and a second row for it would double the same audio into every mix."""
+        nodes = {
+            source.get("node_name")
+            for source in self._sources.values()
+            if sources_module.kind(source) == sources_module.KIND_DEVICE
+        }
+        nodes.add(self.mixer.mic)
+        return {node for node in nodes if node}
+
     def _on_source_confirmed(self, _dialog, name, match_app_name, icon_name):
-        source = sources_module.new_source(
+        self._install_source(sources_module.new_source(
             name=name, match_app_name=match_app_name, icon_name=icon_name,
-        )
+        ))
+
+    def _on_device_source_confirmed(self, _dialog, name, node_name, icon_name):
+        # Queue the re-snapshot before installing: the reconcile that
+        # _install_source triggers refuses to wire a node the snapshot has not
+        # seen, and the worker runs queued tasks in insertion order, so the
+        # refresh lands first. Doing it synchronously would put a pw-dump on
+        # the GTK thread in a click handler.
+        self.mixer.request_capture_poll()
+        self._install_source(sources_module.new_device_source(
+            name=name, node_name=node_name, icon_name=icon_name,
+        ))
+
+    def _install_source(self, source):
+        """Persist a new source of either kind, give it a row, and wire it up."""
         self._sources = sources_module.add(self._sources, source)
         self.matrix.add_source(
             source["id"],
@@ -781,7 +868,7 @@ class WaveXLRWindow(Adw.ApplicationWindow):
             self._wire_cell(source["id"], mix_id)
         self.mixer.set_sources(self._sources)
         self.mixer.poll_streams()
-        self._refresh_app_meter(source["id"])
+        self._refresh_source_meter(source["id"])
 
     def _on_remove_source_clicked(self, _matrix, source_id):
         source = self._sources.get(source_id, {})

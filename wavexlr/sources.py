@@ -1,7 +1,16 @@
 """User-defined matrix sources, persisted to ~/.config/openwave/sources.json.
 
-Each source binds to a PipeWire `application.name` so any current or future
-audio stream from that application gets mixed through the source's row.
+Two kinds of source share this store:
+
+* an *app* source binds to a PipeWire `application.name`, so any current or
+  future audio stream from that application gets mixed through its row;
+* a *device* source binds to the node.name of a hardware capture device — a
+  headset microphone, a line input — which is a Source node rather than a
+  stream and so is wired exactly like the Wave's own mic.
+
+The `kind` field discriminates them. Records written before device sources
+existed carry no `kind` at all, and kind() reads those as app sources, so this
+file is never rewritten merely to add a discriminator.
 """
 
 import json
@@ -34,12 +43,50 @@ def save(sources):
     _atomic_write(CONFIG_PATH, sources)
 
 
-def new_source(*, name, match_app_name, icon_name="applications-multimedia-symbolic"):
-    """Return a fresh source dict ready to insert into the sources mapping."""
+KIND_APP = "app"
+KIND_DEVICE = "device"
+
+DEFAULT_APP_ICON = "applications-multimedia-symbolic"
+DEFAULT_DEVICE_ICON = "audio-input-microphone-symbolic"
+
+
+def kind(source):
+    """The kind of a source record.
+
+    Records predating device sources have no "kind" key; they are app sources,
+    which is why this defaults rather than requiring load() to migrate. An
+    older build reading a file we wrote simply ignores the extra key, so the
+    store stays readable in both directions.
+    """
+    return (source or {}).get("kind") or KIND_APP
+
+
+def new_source(*, name, match_app_name, icon_name=DEFAULT_APP_ICON):
+    """Return a fresh app source dict ready to insert into the sources mapping."""
     return {
         "id": uuid.uuid4().hex[:12],
+        "kind": KIND_APP,
         "name": name,
         "match_app_name": match_app_name,
+        "icon_name": icon_name,
+    }
+
+
+def new_device_source(*, name, node_name, icon_name=DEFAULT_DEVICE_ICON):
+    """Return a fresh capture-device source bound to a PipeWire source node.
+
+    `node_name` is the node.name of a hardware Audio/Source. It is stored in
+    preference to the node's numeric id, which PipeWire reassigns on every
+    replug, and to its description, which is a display string: the ALSA node
+    name encodes the card and profile and survives a power cycle. `name` is
+    the user's label for the row and is free to differ, the same split
+    mixes.py keeps between a mix's `name` and its `sink`.
+    """
+    return {
+        "id": uuid.uuid4().hex[:12],
+        "kind": KIND_DEVICE,
+        "name": name,
+        "node_name": node_name,
         "icon_name": icon_name,
     }
 

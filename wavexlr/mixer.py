@@ -19,6 +19,7 @@ import subprocess
 import threading
 import time
 from threading import Event, Lock
+from . import sources
 
 _log = logging.getLogger(__name__)
 
@@ -190,6 +191,59 @@ def list_output_sinks():
     return out
 
 
+def list_capture_sources():
+    """Return [{name, description, priority}, ...] of hardware capture devices.
+
+    The mirror of list_output_sinks, using the same discriminator for the same
+    reason: `device.id` is non-null only on a node backed by a real device, so
+    one test separates a headset microphone from every virtual Audio/Source —
+    our own mix sources (openwave_*_mix_source) and any null-sink source the
+    user has configured. Verified against pw-dump on a machine carrying an
+    Elgato XLR Dock, a SteelSeries Arctis Nova Pro and a generic USB codec:
+    the three hardware inputs each carry a device.id, the three openwave
+    virtual sources carry none.
+
+    Monitor sources are excluded for free. A sink's monitor is a set of ports
+    on the Audio/Sink node, not a node of its own, so it never appears here as
+    an Audio/Source at all — only pactl synthesises the "<sink>.monitor"
+    names. The name guards below are belt and braces against a future PipeWire
+    that publishes them as nodes. Keeping monitors out matters for the reason
+    list_output_sinks keeps virtual sinks out: a mix sink's monitor fed back
+    into that mix is a feedback loop.
+    """
+    import json as _json
+    try:
+        r = subprocess.run(["pw-dump"], capture_output=True, text=True, timeout=5)
+        if r.returncode != 0:
+            return []
+        objects = _json.loads(r.stdout)
+    except (FileNotFoundError, subprocess.SubprocessError, _json.JSONDecodeError):
+        return []
+
+    out = []
+    for obj in objects:
+        if obj.get("type") != "PipeWire:Interface:Node":
+            continue
+        props = (obj.get("info") or {}).get("props") or {}
+        if props.get("media.class") != "Audio/Source":
+            continue
+        if props.get("device.id") is None:
+            continue
+        name = props.get("node.name", "")
+        if not name or name.startswith("openwave_") or name.endswith(".monitor"):
+            continue
+        try:
+            priority = int(props.get("priority.session", 0))
+        except (TypeError, ValueError):
+            priority = 0
+        out.append({
+            "name": name,
+            "description": props.get("node.description") or name,
+            "priority": priority,
+        })
+    out.sort(key=lambda source: source["description"].lower())
+    return out
+
 def _default_sink_name():
     try:
         r = subprocess.run(
@@ -257,6 +311,11 @@ class Mixer:
         self._sources = {}
         self._mixes = {}
         self._streams = {}
+        # node.name set of the hardware capture devices PipeWire currently
+        # has. _reconcile_capture_cell consults it to decide whether a device
+        # source can be wired at all. Always *rebound*, never mutated in
+        # place, so a worker-thread read always sees one whole snapshot.
+        self._live_captures = frozenset()
         # _do_start ends with a full reconcile. Reconciling before it would
         # route cells into sinks it has not yet created or swept, so
         # set_sources/set_mixes stay silent until it has run once.
@@ -625,6 +684,69 @@ class Mixer:
         if added or removed:
             self._enqueue(("poll",), self._reconcile_all)
         return added, removed
+    def _refresh_live_captures(self):
+        """Re-snapshot present capture devices. Returns (added, removed) names.
+
+        An empty result is discarded rather than believed. pw-dump failing — a
+        timeout, a session manager restarting under us — is indistinguishable
+        from "every capture device vanished", and acting on the latter would
+        tear down the mic row's loopbacks along with everything else. A machine
+        with genuinely no capture hardware has nothing for this snapshot to
+        gate (the `not capture_node` guard already covers "no Wave"), so
+        keeping the previous value costs nothing and refusing to act on a
+        transient failure is the safe side to err on.
+        """
+        names = frozenset(source["name"] for source in list_capture_sources())
+        if not names:
+            return set(), set()
+        with self._lock:
+            previous = self._live_captures
+            self._live_captures = names
+        return set(names) - set(previous), set(previous) - set(names)
+
+    def poll_capture_devices(self):
+        """Refresh the capture-device snapshot; reconcile if anything moved.
+
+        The counterpart to poll_streams for device sources: a headset powering
+        off or coming back changes no stream, so without this nothing would
+        ever notice. Shares poll_streams' ("poll",) enqueue key, so a tick that
+        sees both kinds of change still costs one reconcile pass.
+
+        Returns (added, removed) node-name sets for the caller's bookkeeping.
+        """
+        added, removed = self._refresh_live_captures()
+        if added or removed:
+            self._enqueue(("poll",), self._reconcile_all)
+        return added, removed
+
+    def request_capture_poll(self):
+        """Re-snapshot capture devices on the worker, reconciling if it moved.
+
+        The subprocess belongs off the GTK thread: list_capture_sources runs
+        pw-dump with a 5 second timeout, and this is driven from a GLib
+        timeout. Shares poll_streams' key so a tick seeing both kinds of
+        change still costs one reconcile.
+        """
+        self._enqueue(("poll",), self._do_poll_capture_devices)
+
+    def _do_poll_capture_devices(self):
+        added, removed = self._refresh_live_captures()
+        if added or removed:
+            self._reconcile_all()
+
+    def capture_device_present(self, node_name):
+        """True if `node_name` is a capture device PipeWire currently has.
+
+        Fail-open, deliberately, and identically to the routing gate in
+        _reconcile_capture_cell: an empty snapshot means "not yet seeded, or
+        pw-dump failed", not "every device vanished". Reading it fail-closed
+        here while the gate reads it fail-open made the two disagree -- audio
+        routed while the row was drawn as dead.
+        """
+        if not node_name:
+            return False
+        live = self._live_captures
+        return not live or node_name in live
 
     # ----- worker-side implementations -----
     def _do_start(self):
@@ -632,6 +754,8 @@ class Mixer:
         self._respawn_all_output_loopbacks()
         with self._lock:
             self._streams = {s["id"]: s for s in list_audio_streams()}
+        # Outside the lock above: _refresh_live_captures takes it itself.
+        self._refresh_live_captures()
         self._started = True
         self._reconcile_all()
 
@@ -743,23 +867,64 @@ class Mixer:
             f"{source_id}.{mix_id}", {"volume": 0.0, "muted": False}
         )
         if source_id == "mic":
-            self._reconcile_mic_cell(mix_id, state["volume"], state["muted"])
-        else:
-            self._reconcile_app_cell(source_id, mix_id, state["volume"], state["muted"])
+            self._reconcile_capture_cell(
+                source_id, mix_id, self.mic, state["volume"], state["muted"],
+            )
+            return
+        # Read without the lock, exactly as _reconcile_app_cell already does:
+        # set_sources rebinds this dict rather than mutating it, so worker code
+        # only ever sees a finished one.
+        source = self._sources.get(source_id)
+        if source is not None and sources.kind(source) == sources.KIND_DEVICE:
+            self._reconcile_capture_cell(
+                source_id, mix_id, source.get("node_name"),
+                state["volume"], state["muted"],
+            )
+            return
+        self._reconcile_app_cell(source_id, mix_id, state["volume"], state["muted"])
 
-    def _reconcile_mic_cell(self, mix_id, volume, muted):
-        if not self.mic:
-            return
+    @staticmethod
+    def _capture_loopback_name(source_id, mix_id):
+        """node.name for a capture→mix loopback.
+
+        The built-in mic keeps its historical name so upgrading does not orphan
+        a loopback that is already running under it. Source ids are uuid4 hex
+        and mix ids are [a-z0-9_], so "dev_<source>_to_<mix>" can collide
+        neither with the mic form (no source id is the literal "mic") nor with
+        an app cell's "<source>_<mix>_<stream>" (no source id is the literal
+        "dev"). Every form keeps the openwave_loop_ prefix that
+        _sweep_stale_loopbacks pkills.
+        """
+        if source_id == "mic":
+            return f"openwave_loop_mic_to_{mix_id}"
+        return f"openwave_loop_dev_{source_id}_to_{mix_id}"
+
+    def _reconcile_capture_cell(self, source_id, mix_id, capture_node, volume, muted):
+        """Wire one capture *node* into one mix sink at a per-cell level.
+
+        Generalises what used to be _reconcile_mic_cell. A hardware capture
+        device is a Source node, precisely like the Wave's own mic, so the only
+        things that differ between the built-in mic row and a headset row are
+        which node name goes in and what the loopback is called.
+
+        A node PipeWire does not currently have cannot be linked, and spawning
+        anyway is worse than doing nothing: pw-loopback starts fine (the
+        playback target exists), _link_capture finds no source ports and gives
+        up, and the resulting live-but-silent process leaves a key in
+        self._procs that blocks forever the respawn that would fix it when the
+        device returns. So tear down instead and let the next
+        poll_capture_devices pass rebuild it.
+        """
+        key = (source_id, mix_id)
+        node_name = self._capture_loopback_name(source_id, mix_id)
         mix_sink = self._mix_sink(mix_id)
-        if not mix_sink:
-            return
-        key = ("mic", mix_id)
-        node_name = f"openwave_loop_mic_to_{mix_id}"
-        if volume <= 0.0:
+        live = self._live_captures
+        absent = bool(live) and capture_node not in live
+        if not capture_node or not mix_sink or volume <= 0.0 or absent:
             self._destroy_loopback(key)
             return
         if key not in self._procs:
-            self._spawn_loopback(key, self.mic, mix_sink, node_name)
+            self._spawn_loopback(key, capture_node, mix_sink, node_name)
         node_id = _node_id_by_name(node_name)
         if node_id is not None:
             _wpctl("set-volume", node_id, f"{volume:.3f}")
