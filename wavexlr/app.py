@@ -768,12 +768,15 @@ class WaveXLRApp(Adw.Application):
             )
 
     def do_shutdown(self):
-        """Tear down loopback + meter subprocesses before the process exits."""
+        """Stop polling, drop the USB link, and tear down loopback + meter
+        subprocesses before the process exits."""
         if self._window is not None:
+            self._window._stop_polling()
             if hasattr(self._window, "meter"):
                 self._window.meter.stop_all()
             if hasattr(self._window, "mixer"):
                 self._window.mixer.stop()
+            self._window.dev.disconnect()
         Adw.Application.do_shutdown(self)
 
     def _on_close_request(self, window):
@@ -863,12 +866,6 @@ class WaveXLRApp(Adw.Application):
         win = WaveXLRWindow(application=self)
         self._window = win
         win.present()
-
-    def do_shutdown(self):
-        if self._window:
-            self._window._stop_polling()
-            self._window.dev.disconnect()
-        Adw.Application.do_shutdown(self)
 
 
 def main():

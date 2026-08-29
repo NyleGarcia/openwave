@@ -549,7 +549,26 @@ class Mixer:
         time.sleep(0.2)  # give the kernel a beat to reap so we don't race
 
     # ----- internal -----
+    def _reap_dead(self):
+        """Drop bookkeeping for loopbacks whose process has already exited.
+
+        Nothing else reconciles self._procs against process reality, so an
+        out-of-band death — the child killed, or PipeWire restarted under it —
+        leaves a key that permanently blocks respawn, because _spawn_loopback
+        returns early on `key in self._procs`. The dead child also stays a
+        zombie, since only _destroy_loopback ever wait()s one.
+        """
+        for key, proc in list(self._procs.items()):
+            if proc.poll() is None:
+                continue
+            try:
+                proc.wait(timeout=0)
+            except (subprocess.SubprocessError, OSError):
+                pass
+            self._procs.pop(key, None)
+
     def _reconcile_all(self):
+        self._reap_dead()
         for source_id in (["mic"] + list(self._sources.keys())):
             for mix_id in MIX_SINKS:
                 self._reconcile_cell(source_id, mix_id)
