@@ -271,6 +271,26 @@ class MixMatrix(Gtk.Box):
         self.emit("move-source-clicked", dragged, delta)
         return True
 
+    def set_source(self, source_id, *, name=None, icon_name=None):
+        """Update a row's label, and the spec a rebuild restores it from.
+
+        Setting it on the widget alone is not enough: reorder_sources tears
+        every row down and rebuilds it from _source_specs, so a name applied
+        only to the cell is silently reverted by the next drag.
+        """
+        cell = self._sources.get(source_id)
+        spec = self._source_specs.get(source_id)
+        if name is not None:
+            if cell is not None:
+                cell.set_name(name)
+            if spec is not None:
+                spec["name"] = name
+        if icon_name is not None:
+            if cell is not None:
+                cell.set_icon(icon_name)
+            if spec is not None:
+                spec["icon_name"] = icon_name
+
     def reorder_sources(self, order):
         """Redraw the source rows in `order`.
 

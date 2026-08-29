@@ -1111,8 +1111,22 @@ class WaveXLRWindow(Adw.ApplicationWindow):
             if dev.get("name") == node:
                 label = dev.get("short_name") or dev.get("description")
                 if label:
-                    self.mic_source.set_name(label)
+                    # Through the matrix, so the rebuilt row keeps the name:
+                    # setting it on the cell alone is undone by any reorder.
+                    self.matrix.set_source("mic", name=label)
                 return
+
+    def _remove_source_row(self, source_id):
+        """Drop a source and its row, without a confirmation prompt.
+
+        For rows OpenWave itself decides are redundant; the user-facing delete
+        path goes through _on_remove_source_clicked and its dialog.
+        """
+        self.mixer.remove_source(source_id)
+        self._sources = sources_module.remove(self._sources, source_id)
+        self.matrix.remove_source(source_id)
+        self.meter.stop(source_id)
+        self._meter_targets.pop(source_id, None)
 
     def _autodiscover_elgato_inputs(self):
         """Give every Elgato capture input a row of its own, once.
@@ -1144,6 +1158,16 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         if promoted:
             sources_module.save(self._sources)
 
+        # The built-in row can move between devices as cards come and go, so a
+        # device source may end up duplicating it. Two rows on one capture
+        # node route the same microphone twice into every mix.
+        mic_node = getattr(self.mixer, "mic", None)
+        for sid, source in list(self._sources.items()):
+            if (mic_node
+                    and sources_module.kind(source) == sources_module.KIND_DEVICE
+                    and source.get("node_name") == mic_node):
+                self._remove_source_row(sid)
+
         bound = self._bound_capture_nodes()
         added = []
         for dev in _list_captures():
@@ -1174,6 +1198,7 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         for sid in self._sources:
             self._wire_source_row(sid)
         self._wire_matrix_cells()
+        self._name_builtin_mic_row()
         self._save_ui_state()
 
     def _wire_source_row(self, source_id):

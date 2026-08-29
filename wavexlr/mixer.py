@@ -128,19 +128,44 @@ def _is_wave_card(node_name):
     return any(token in node_name for token in CARD_NAME_TOKENS)
 
 
+def _node_device_stem(node_name):
+    """The device-identifying middle of an ALSA node name.
+
+    alsa_input.usb-Elgato_Systems_Elgato_XLR_Dock_A8A9A40411NOP9-00.mono-fallback
+      -> usb-Elgato_Systems_Elgato_XLR_Dock_A8A9A40411NOP9-00
+
+    It carries the serial, so it distinguishes two devices of the same model.
+    """
+    body = node_name.split(".", 1)[-1]
+    return body.rsplit(".", 1)[0] if "." in body else body
+
+
 def find_wave_xlr_alsa():
-    """Return (mic_node_name, hp_node_name); either may be None if unplugged."""
-    mic = next(
-        (p[1] for p in _pactl_short("sources")
-         if len(p) > 1 and p[1].startswith("alsa_input") and _is_wave_card(p[1])),
-        None,
-    )
-    hp = next(
-        (p[1] for p in _pactl_short("sinks")
-         if len(p) > 1 and p[1].startswith("alsa_output") and _is_wave_card(p[1])),
-        None,
-    )
-    return mic, hp
+    """Return (mic_node_name, hp_node_name) for ONE Wave device.
+
+    Both halves must come from the same physical device. Picking the first
+    matching capture node and the first matching sink independently paired the
+    microphone of one device with the headphone output of another as soon as
+    two were connected -- so the gain slider drove one box and the headphone
+    slider another, with nothing to say so.
+    """
+    captures = [p[1] for p in _pactl_short("sources")
+                if len(p) > 1 and p[1].startswith("alsa_input")
+                and _is_wave_card(p[1])]
+    sinks = {_node_device_stem(p[1]): p[1] for p in _pactl_short("sinks")
+             if len(p) > 1 and p[1].startswith("alsa_output")
+             and _is_wave_card(p[1])}
+
+    # Prefer a device that offers both, so the two controls agree.
+    for capture in captures:
+        hp = sinks.get(_node_device_stem(capture))
+        if hp:
+            return capture, hp
+
+    # Otherwise take what exists: a card set to an input-only profile has a
+    # microphone and no output, which is a normal configuration.
+    return (captures[0] if captures else None,
+            next(iter(sinks.values()), None) if not captures else None)
 
 
 def _node_id_by_name(name, retries=20):
