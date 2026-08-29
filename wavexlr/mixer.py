@@ -37,6 +37,25 @@ except (OSError, AttributeError):
     _libc = None
 
 
+SOURCE_SINK_PREFIX = "openwave_src_"
+
+
+def source_sink_name(source_id):
+    """The intake sink an application source's streams are moved onto."""
+    return f"{SOURCE_SINK_PREFIX}{source_id}"
+
+
+def _move_stream(serial, sink_name):
+    """Move a stream onto a sink. `serial` is PulseAudio's index for it."""
+    try:
+        subprocess.run(
+            ["pactl", "move-sink-input", str(serial), sink_name],
+            capture_output=True, text=True, timeout=3,
+        )
+    except (FileNotFoundError, subprocess.SubprocessError):
+        pass
+
+
 def _is_output_key(key):
     """True for a mix's output loopback, which outlives this process."""
     return isinstance(key, tuple) and len(key) == 2 and key[0] == "output"
@@ -303,6 +322,10 @@ def list_audio_streams():
             continue
         out.append({
             "id": obj["id"],
+            # PulseAudio addresses a stream by object.serial, and pactl is the
+            # only thing that reliably moves one (pw-metadata target.object was
+            # measured not to).
+            "serial": props.get("object.serial"),
             "app_name": app,
             "media_name": props.get("media.name", ""),
             "node_name": node_name,
@@ -356,13 +379,15 @@ def _match_rank(source, stream, identities=None):
     `identities` may be passed in so a caller checking many sources against one
     stream normalizes that stream once.
     """
-    want = _normalize(source.get("match_app_name"))
-    if not want:
+    from . import sources as _sources
+    wanted = {_normalize(name) for name in _sources.bindings(source)}
+    wanted.discard("")
+    if not wanted:
         return None
     if identities is None:
         identities = _stream_identities(stream)
     for rank, identity in enumerate(identities):
-        if identity and identity == want:
+        if identity and identity in wanted:
             return rank
     return None
 
@@ -425,6 +450,9 @@ class Mixer:
         # source can be wired at all. Always *rebound*, never mutated in
         # place, so a worker-thread read always sees one whole snapshot.
         self._live_captures = frozenset()
+        # Intake sinks we have created, so tearing one down costs no subprocess
+        # when there was never one to tear down.
+        self._intakes = set()
         # _do_start ends with a full reconcile. Reconciling before it would
         # route cells into sinks it has not yet created or swept, so
         # set_sources/set_mixes stay silent until it has run once.
@@ -712,6 +740,13 @@ class Mixer:
         except RuntimeError:
             pass
         with self._lock:
+            source_ids = list(self._sources)
+        for source_id in source_ids:
+            # Hand every moved stream back before we go: an intake sink lingers
+            # by necessity, so leaving one behind would strand the application
+            # in silence until OpenWave next runs.
+            self._destroy_source_sink(source_id)
+        with self._lock:
             for key in list(self._procs.keys()):
                 if _is_output_key(key):
                     # Deliberately left running; _sweep_stale_loopbacks reclaims
@@ -880,6 +915,7 @@ class Mixer:
     # ----- worker-side implementations -----
     def _do_start(self):
         self._sweep_stale_loopbacks()
+        self._sweep_orphan_source_sinks()
         self._respawn_all_output_loopbacks()
         with self._lock:
             self._streams = {s["id"]: s for s in list_audio_streams()}
@@ -917,6 +953,10 @@ class Mixer:
         self._respawn_output_loopback(mix_id)
 
     def _do_remove_source(self, source_id):
+        # Destroy the intake first: it returns any parked stream to the default
+        # sink, so removing a source hands the application back rather than
+        # leaving it playing into a sink nothing drains.
+        self._destroy_source_sink(source_id)
         with self._lock:
             keys = [
                 k for k in self._procs
@@ -947,6 +987,21 @@ class Mixer:
             # already reaches back into this package the same way.
             from . import setup as setup_module
             setup_module.destroy_mix_sink(sink_name)
+
+    def _sweep_orphan_source_sinks(self):
+        """Destroy intake sinks with no source behind them.
+
+        They linger by necessity, so a crash leaves them holding whatever
+        application was parked on them -- silent, because nothing drains an
+        intake sink but the loopback that died with us. Destroying them here
+        returns those streams to the default sink.
+        """
+        from . import setup
+        with self._lock:
+            known = {source_sink_name(sid) for sid in self._sources}
+        for name in setup.list_sink_names(SOURCE_SINK_PREFIX):
+            if name not in known:
+                setup.destroy_mix_sink(name)
 
     @staticmethod
     def _sweep_stale_loopbacks():
@@ -1060,45 +1115,92 @@ class Mixer:
             _wpctl("set-mute", node_id, "1" if muted else "0")
 
     def _reconcile_app_cell(self, source_id, mix_id, volume, muted):
-        # Snapshot both dicts under the lock: remove_source mutates _sources in
-        # place from the GTK thread and claim_streams iterates it, so an
-        # unlocked iteration could raise into _worker_loop's bare except and
-        # leave this cell unwired. The lock is released before anything below —
-        # _spawn_loopback/_destroy_loopback must never be called holding it.
+        """Route an application source into one mix.
+
+        The stream is MOVED onto the source's own intake sink, not copied from
+        wherever it already plays. Copying left the application still connected
+        to its original sink, so when that sink was one of our mixes -- which it
+        normally is, the monitoring mix being the system default -- the audio
+        arrived twice and this cell's fader could only add a second copy on top
+        of the untouched original. Pulling it to zero changed nothing audible.
+
+        With the stream moved, the loopback out of the intake sink is the only
+        path, so the fader is authoritative.
+        """
         with self._lock:
             sources = dict(self._sources)
             streams = dict(self._streams)
-        if source_id not in sources:
+        source = sources.get(source_id)
+        if source is None:
             return
         mix_sink = self._mix_sink(mix_id)
         if not mix_sink:
             return
-        # One owner per stream: see claim_streams for why bare matching would
-        # route a shared stream into this mix twice, at roughly +6 dB.
-        matching_stream_ids = claim_streams(sources, streams).get(source_id, set())
-        existing_keys = {
-            k for k in self._procs
-            if len(k) == 3 and k[0] == source_id and k[1] == mix_id
-        }
 
-        # Tear down loopbacks for streams that vanished or for a zeroed cell
-        for k in list(existing_keys):
-            if volume <= 0.0 or k[2] not in matching_stream_ids:
-                self._destroy_loopback(k)
-
-        if volume <= 0.0:
+        if not self._source_is_routed(source_id):
+            # Nothing carries this source anywhere. Hand back any stream we
+            # parked and leave the application on whatever it chose.
+            self._destroy_loopback((source_id, mix_id))
+            if source_id in self._intakes:
+                self._destroy_source_sink(source_id)
             return
 
-        # Spawn (or update volume on) loopbacks for each currently-matching stream
-        for stream_id in matching_stream_ids:
-            key = (source_id, mix_id, stream_id)
-            node_name = f"openwave_loop_{source_id}_{mix_id}_{stream_id}"
-            stream_node_name = streams.get(stream_id, {}).get("node_name", "")
-            if not stream_node_name:
-                continue
-            if key not in self._procs:
-                self._spawn_loopback(key, stream_node_name, mix_sink, node_name)
-            node_id = _node_id_by_name(node_name)
-            if node_id is not None:
-                _wpctl("set-volume", node_id, f"{volume:.3f}")
-                _wpctl("set-mute", node_id, "1" if muted else "0")
+        intake = self._ensure_source_sink(source_id, source.get("name", source_id))
+        if intake is None:
+            return
+
+        for stream_id in claim_streams(sources, streams).get(source_id, set()):
+            stream = streams.get(stream_id) or {}
+            serial = stream.get("serial")
+            if serial is not None:
+                _move_stream(serial, intake)
+
+        # One loopback per (source, mix), not per stream: every stream for this
+        # source shares the intake sink, so they share the path out of it and
+        # one volume applies to all of them.
+        key = (source_id, mix_id)
+        node_name = f"openwave_loop_{source_id}_{mix_id}"
+        if volume <= 0.0:
+            self._destroy_loopback(key)
+            return
+        if key not in self._procs:
+            self._spawn_loopback(key, intake, mix_sink, node_name)
+        node_id = _node_id_by_name(node_name)
+        if node_id is not None:
+            _wpctl("set-volume", node_id, f"{volume:.3f}")
+            _wpctl("set-mute", node_id, "1" if muted else "0")
+
+    def _source_is_routed(self, source_id):
+        """True if any mix carries this source above zero.
+
+        Moving a stream onto an intake sink that nothing drains would mute the
+        application outright, so a source routed nowhere is left where it is.
+        """
+        with self._lock:
+            mix_ids = list(self._mixes)
+            state = dict(self._state)
+        return any(
+            (state.get(f"{source_id}.{mix_id}") or {}).get("volume", 0.0) > 0.0
+            for mix_id in mix_ids
+        )
+
+    def _ensure_source_sink(self, source_id, description):
+        """Create the source's intake sink if it is not already live."""
+        from . import setup
+        name = source_sink_name(source_id)
+        try:
+            setup.create_null_sink(name, f"OpenWave: {description}")
+        except Exception:
+            return None
+        self._intakes.add(source_id)
+        return name
+
+    def _destroy_source_sink(self, source_id):
+        """Remove an intake sink, returning any parked stream to the default.
+
+        Measured: destroying the sink reroutes its streams rather than killing
+        them, which is what makes moving them safe to undo.
+        """
+        from . import setup
+        setup.destroy_mix_sink(source_sink_name(source_id))
+        self._intakes.discard(source_id)

@@ -960,7 +960,10 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         is_device = sources_module.kind(source) == sources_module.KIND_DEVICE
         # Snapshot BEFORE update: sources.update mutates the record in place,
         # so reading afterwards would always compare a value to itself.
-        old_binding = source.get("node_name" if is_device else "match_app_name")
+        old_binding = (
+            source.get("node_name") if is_device
+            else sources_module.format_bindings(source)
+        )
 
         # sources_module.update, never new_source: the id is the prefix of every
         # "<source_id>.<mix_id>" cell key, so a fresh id would orphan the levels.
@@ -969,7 +972,10 @@ class WaveXLRWindow(Adw.ApplicationWindow):
             # A device's binding is its node_name, which the dialog shows but
             # does not offer to edit — it is picked from live hardware, and
             # `binding` arrives empty for that flow.
-            fields["match_app_name"] = binding
+            # Stored as a list; drop the superseded singular key so bindings()
+            # cannot read a stale value from it.
+            fields["match_app_names"] = sources_module.parse_bindings(binding)
+            source.pop("match_app_name", None)
         self._sources = sources_module.update(self._sources, source_id, **fields)
 
         cell = self.matrix.source(source_id)

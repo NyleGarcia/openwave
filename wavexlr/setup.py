@@ -205,6 +205,33 @@ def _mix_sink_exists(name):
     return any(line.split("\t", 2)[1] == name for line in r.stdout.splitlines() if "\t" in line)
 
 
+def list_sink_names(prefix=""):
+    """Live sink node names, optionally filtered by prefix."""
+    try:
+        r = subprocess.run(
+            ["pactl", "list", "short", "sinks"],
+            capture_output=True, text=True, timeout=3,
+        )
+    except (FileNotFoundError, subprocess.SubprocessError):
+        return []
+    names = []
+    for line in r.stdout.splitlines():
+        parts = line.split("\t")
+        if len(parts) > 1 and parts[1].startswith(prefix):
+            names.append(parts[1])
+    return names
+
+
+def create_null_sink(name, description):
+    """Public name for the null-sink creator: mixes are not its only user.
+
+    Application sources need one each as a stream intake, and they are created
+    on exactly the same terms -- object.linger is mandatory, because without it
+    the node dies the moment pw-cli exits.
+    """
+    _create_mix_sink_live(name, description)
+
+
 def _create_mix_sink_live(name, description):
     """Spawn a null sink immediately so it appears without a PipeWire restart."""
     if _mix_sink_exists(name):

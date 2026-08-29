@@ -61,6 +61,33 @@ def kind(source):
     return (source or {}).get("kind") or KIND_APP
 
 
+def bindings(source):
+    """Every application name this source is bound to.
+
+    Older records carry one `match_app_name` string. Newer ones carry a
+    `match_app_names` list, so a single row can gather several applications --
+    a Music row gathering two players, or a Games row gathering every game,
+    each with one fader instead of a row apiece.
+    """
+    names = source.get("match_app_names")
+    if isinstance(names, list):
+        return [str(n).strip() for n in names if str(n).strip()]
+    single = source.get("match_app_name")
+    if isinstance(single, str) and single.strip():
+        return [single.strip()]
+    return []
+
+
+def parse_bindings(text):
+    """Split a comma-separated application list, discarding blanks."""
+    return [part.strip() for part in str(text).split(",") if part.strip()]
+
+
+def format_bindings(source):
+    """The bindings as one comma-separated string, for an entry field."""
+    return ", ".join(bindings(source))
+
+
 def new_source(*, name, match_app_name, icon_name=DEFAULT_APP_ICON):
     """Return a fresh app source dict ready to insert into the sources mapping."""
     return {

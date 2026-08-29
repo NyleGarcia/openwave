@@ -65,7 +65,12 @@ class AddSourceDialog(Adw.Dialog):
         # Capture nodes that already have a matrix row.
         self._exclude_nodes = frozenset(exclude_nodes)
         # None = nothing picked yet, "" = manual entry, else the picked app.
-        self._selected_app = None if source is None else source.get("match_app_name")
+        # Every binding, comma-separated: a source can gather more than one
+        # application, and an edit that showed only the first would silently
+        # drop the rest on save.
+        self._selected_app = (
+            None if source is None else sources_module.format_bindings(source)
+        )
         self._selected_device = None
         self._selected_icon = (source or {}).get("icon_name") or ICON_CHOICES[0][0]
 
@@ -415,10 +420,18 @@ class AddSourceDialog(Adw.Dialog):
             )
             outer.append(app_group)
 
-            self._app_row = Adw.EntryRow(title="Application name")
+            self._app_row = Adw.EntryRow(title="Applications")
             self._app_row.set_text(self._selected_app or "")
             self._app_row.connect("changed", self._on_binding_changed)
             app_group.add(self._app_row)
+            hint = Gtk.Label(
+                label="Separate several with commas, to gather them under one "
+                      "fader \u2014 two music players, or every game.",
+                xalign=0, wrap=True, margin_top=6,
+            )
+            hint.add_css_class("dim-label")
+            hint.add_css_class("caption")
+            app_group.add(hint)
         elif editing:
             # A device source's binding is hardware, not text: show it, do not
             # offer to edit it. Re-pointing a row at a different capture device
