@@ -9,7 +9,20 @@ import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Gtk, Adw, GObject, Pango  # noqa: E402
+from gi.repository import Gtk, Adw, GObject, Gdk, Pango  # noqa: E402
+
+
+def _percent_label():
+    """A fixed-width percentage readout for a 0..1 slider.
+
+    Monospace and width-limited so the row does not reflow as the number
+    changes width between 0% and 100%.
+    """
+    lbl = Gtk.Label(label="0%", xalign=1, width_chars=4)
+    lbl.add_css_class("dim-label")
+    lbl.add_css_class("caption")
+    lbl.add_css_class("monospace")
+    return lbl
 
 
 class MixMatrix(Gtk.Box):
@@ -62,7 +75,10 @@ class MixMatrix(Gtk.Box):
         self._cells = {}
 
         corner = Gtk.Box()
-        corner.set_size_request(260, 64)
+        # Wide enough for the row's full contents: drag handle, icon, name,
+        # mute, level, meter, edit and remove. At 260 the name was the only
+        # flexible part, so it ellipsized away to nothing.
+        corner.set_size_request(400, 64)
         self._grid.attach(corner, 0, 0, 1, 1)
 
         # "+ Add Source" / "+ Add Mix" trailing affordances, below the grid.
@@ -79,7 +95,7 @@ class MixMatrix(Gtk.Box):
             halign=Gtk.Align.START,
         )
         self._add_btn.add_css_class("openwave-add-source")
-        self._add_btn.set_size_request(260, -1)
+        self._add_btn.set_size_request(400, -1)
         self._add_btn.connect("clicked", lambda _: self.emit("add-source-clicked"))
         add_row.append(self._add_btn)
 
@@ -168,11 +184,11 @@ class MixMatrix(Gtk.Box):
             header.set_outputs(entries, current, summary, monitored)
 
     def add_source(self, source_id, *, name, icon_name, has_level=False,
-                   removable=False, editable=False):
+                   removable=False, editable=False, reorderable=False):
         row = len(self._source_ids) + 1
         source = SourceCell(
-            name=name, icon_name=icon_name,
-            has_level=has_level, removable=removable, editable=editable,
+            name=name, icon_name=icon_name, has_level=has_level,
+            removable=removable, editable=editable, reorderable=reorderable,
         )
         if editable:
             source.connect(
@@ -184,6 +200,8 @@ class MixMatrix(Gtk.Box):
                 "remove-clicked",
                 lambda _s, sid=source_id: self.emit("remove-source-clicked", sid),
             )
+        if reorderable:
+            self._make_row_draggable(source, source_id)
         source.connect(
             "move-clicked",
             lambda _s, delta, sid=source_id: self.emit("move-source-clicked", sid, delta),
@@ -194,7 +212,7 @@ class MixMatrix(Gtk.Box):
         # Remembered so reorder_sources can rebuild a row exactly as it was.
         self._source_specs[source_id] = dict(
             name=name, icon_name=icon_name, has_level=has_level,
-            removable=removable, editable=editable,
+            removable=removable, editable=editable, reorderable=reorderable,
         )
 
         for col_idx, mix_id in enumerate(self._mix_ids):
@@ -204,6 +222,52 @@ class MixMatrix(Gtk.Box):
 
         return source
 
+    def _make_row_draggable(self, cell, source_id):
+        """Let a row be dragged onto another to take its place.
+
+        The drop is expressed as a delta and pushed through the same
+        move-source-clicked path the buttons used, so ordering, clamping and
+        persistence stay in one place.
+        """
+        drag = Gtk.DragSource(actions=Gdk.DragAction.MOVE)
+        drag.connect(
+            "prepare",
+            lambda _d, _x, _y, sid=source_id: Gdk.ContentProvider.new_for_value(sid),
+        )
+
+        def _begin(_source, drag_obj, widget=cell):
+            # Drag the row's own likeness, so it is obvious what is moving.
+            icon = Gtk.DragIcon.get_for_drag(drag_obj)
+            paintable = Gtk.WidgetPaintable.new(widget)
+            picture = Gtk.Picture.new_for_paintable(paintable)
+            picture.set_size_request(widget.get_width(), widget.get_height())
+            icon.set_child(picture)
+            widget.set_opacity(0.35)
+
+        drag.connect("drag-begin", _begin)
+        drag.connect("drag-end", lambda _s, _d, _r, w=cell: w.set_opacity(1.0))
+        drag.connect("drag-cancel",
+                     lambda _s, _d, _r, w=cell: (w.set_opacity(1.0), False)[1])
+        cell.add_controller(drag)
+
+        drop = Gtk.DropTarget.new(GObject.TYPE_STRING, Gdk.DragAction.MOVE)
+        drop.connect("drop", self._on_row_drop, source_id)
+        drop.connect("enter", lambda _t, _x, _y, w=cell:
+                     (w.add_css_class("openwave-drop-target"), Gdk.DragAction.MOVE)[1])
+        drop.connect("leave", lambda _t, w=cell: w.remove_css_class("openwave-drop-target"))
+        cell.add_controller(drop)
+
+    def _on_row_drop(self, _target, value, _x, _y, target_id):
+        dragged = str(value)
+        cell = self._sources.get(target_id)
+        if cell is not None:
+            cell.remove_css_class("openwave-drop-target")
+        if dragged == target_id or dragged not in self._source_ids:
+            return False
+        delta = self._source_ids.index(target_id) - self._source_ids.index(dragged)
+        self.emit("move-source-clicked", dragged, delta)
+        return True
+
     def reorder_sources(self, order):
         """Redraw the source rows in `order`.
 
@@ -211,8 +275,13 @@ class MixMatrix(Gtk.Box):
         MixCell is recreated, so the caller must re-wire the cells afterwards --
         their widgets are new objects and carry no state.
         """
+        # The built-in microphone row is pinned to the top and is not part of
+        # the user's ordering: it is not in the sources store, so `order` never
+        # mentions it, and rebuilding without it would delete the row outright.
+        pinned = [sid for sid in self._source_ids if sid not in order]
         specs = [(sid, self._source_specs[sid])
-                 for sid in order if sid in self._source_specs]
+                 for sid in pinned + [s for s in order if s not in pinned]
+                 if sid in self._source_specs]
         for _ in range(len(self._source_ids)):
             self._grid.remove_row(1)     # row 0 is the header; rows shift up
         self._source_ids = []
@@ -224,15 +293,6 @@ class MixMatrix(Gtk.Box):
             self.add_source(sid, **spec)
         self._source_specs.update({k: v for k, v in kept.items()
                                    if k in self._source_specs})
-        self.refresh_move_buttons()
-
-    def refresh_move_buttons(self):
-        """Disable Up on the first row and Down on the last."""
-        last = len(self._source_ids) - 1
-        for idx, sid in enumerate(self._source_ids):
-            cell = self._sources.get(sid)
-            if cell is not None and hasattr(cell, "set_move_enabled"):
-                cell.set_move_enabled(idx > 0, idx < last)
 
     def remove_source(self, source_id):
         if source_id not in self._source_ids:
@@ -550,14 +610,15 @@ class SourceCell(Gtk.Box):
         "edit-clicked": (GObject.SignalFlags.RUN_FIRST, None, ()),
     }
 
-    def __init__(self, *, name, icon_name, has_level, removable=False, editable=False):
+    def __init__(self, *, name, icon_name, has_level, removable=False,
+                 editable=False, reorderable=False):
         super().__init__(
             orientation=Gtk.Orientation.HORIZONTAL,
             spacing=10,
         )
         self.add_css_class("openwave-source-cell")
         self.add_css_class("card")
-        self.set_size_request(260, 64)
+        self.set_size_request(400, 64)
 
         inner = Gtk.Box(
             orientation=Gtk.Orientation.HORIZONTAL,
@@ -569,6 +630,13 @@ class SourceCell(Gtk.Box):
             hexpand=True,
         )
         self.append(inner)
+
+        if reorderable:
+            handle = Gtk.Image.new_from_icon_name("list-drag-handle-symbolic")
+            handle.set_pixel_size(14)
+            handle.add_css_class("dim-label")
+            handle.set_tooltip_text("Drag to reorder")
+            inner.append(handle)
 
         self._icon = Gtk.Image.new_from_icon_name(icon_name)
         self._icon.set_pixel_size(26)
@@ -583,6 +651,10 @@ class SourceCell(Gtk.Box):
         inner.append(text)
 
         self._name_lbl = Gtk.Label(label=name, xalign=0, hexpand=True, ellipsize=3)
+        # Without a width request the label yields all its space to the
+        # controls beside it and renders as a bare ellipsis.
+        self._name_lbl.set_width_chars(10)
+        self._name_lbl.set_tooltip_text(name)
         self._name_lbl.add_css_class("heading")
         text.append(self._name_lbl)
 
@@ -614,10 +686,12 @@ class SourceCell(Gtk.Box):
             valign=Gtk.Align.CENTER,
             round_digits=2,
         )
+        self._pct_lbl = _percent_label()
         self._scale.add_css_class("openwave-mix-slider")
         self._scale.set_size_request(110, -1)
         self._scale_handler = self._scale.connect("value-changed", self._on_value_changed)
         inner.append(self._scale)
+        inner.append(self._pct_lbl)
 
         self._level = None
         if has_level:
@@ -637,24 +711,6 @@ class SourceCell(Gtk.Box):
             inner.append(self._level)
 
         if editable:
-            up_btn = Gtk.Button(
-                icon_name="go-up-symbolic", valign=Gtk.Align.CENTER,
-                tooltip_text="Move up",
-            )
-            up_btn.add_css_class("flat")
-            up_btn.add_css_class("circular")
-            up_btn.connect("clicked", lambda _b: self.emit("move-clicked", -1))
-            self._up_btn = up_btn
-
-            down_btn = Gtk.Button(
-                icon_name="go-down-symbolic", valign=Gtk.Align.CENTER,
-                tooltip_text="Move down",
-            )
-            down_btn.add_css_class("flat")
-            down_btn.add_css_class("circular")
-            down_btn.connect("clicked", lambda _b: self.emit("move-clicked", 1))
-            self._down_btn = down_btn
-
             edit_btn = Gtk.Button(
                 icon_name="document-edit-symbolic",
                 valign=Gtk.Align.CENTER,
@@ -663,8 +719,6 @@ class SourceCell(Gtk.Box):
             edit_btn.add_css_class("flat")
             edit_btn.add_css_class("circular")
             edit_btn.connect("clicked", lambda _: self.emit("edit-clicked"))
-            inner.append(up_btn)
-            inner.append(down_btn)
             inner.append(edit_btn)
 
         if removable:
@@ -678,15 +732,9 @@ class SourceCell(Gtk.Box):
             remove_btn.connect("clicked", lambda _: self.emit("remove-clicked"))
             inner.append(remove_btn)
 
-    def set_move_enabled(self, up, down):
-        """Grey the ends of the list rather than letting them do nothing."""
-        if getattr(self, "_up_btn", None) is not None:
-            self._up_btn.set_sensitive(up)
-        if getattr(self, "_down_btn", None) is not None:
-            self._down_btn.set_sensitive(down)
-
     def set_name(self, name):
         self._name_lbl.set_label(name)
+        self._name_lbl.set_tooltip_text(name)
 
     def set_icon(self, icon_name):
         self._icon.set_from_icon_name(icon_name)
@@ -704,10 +752,16 @@ class SourceCell(Gtk.Box):
             self._name_lbl.add_css_class("dim-label")
             self.set_tooltip_text(reason)
 
+    def _sync_percent(self):
+        if getattr(self, "_pct_lbl", None) is not None:
+            self._pct_lbl.set_label(f"{round(self._scale.get_value() * 100):d}%")
+
     def set_volume(self, value):
         """Update the master slider without firing the changed signal."""
         with GObject.signal_handler_block(self._scale, self._scale_handler):
             self._scale.set_value(max(0.0, min(1.0, value)))
+        # The changed handler is blocked above, so the readout is updated here.
+        self._sync_percent()
 
     def set_level(self, value):
         """Update the audio activity meter (0.0–1.0). No-op if not enabled."""
@@ -755,6 +809,7 @@ class SourceCell(Gtk.Box):
                 self._level.add_css_class("success")
 
     def _on_value_changed(self, scale):
+        self._sync_percent()
         self.emit("volume-changed", scale.get_value())
 
     def _on_mute_toggled(self, btn):
@@ -809,13 +864,21 @@ class MixCell(Gtk.Box):
             hexpand=True,
             round_digits=2,
         )
+        self._pct_lbl = _percent_label()
         self._scale.add_css_class("openwave-mix-slider")
         self._scale_handler = self._scale.connect("value-changed", self._on_value_changed)
         inner.append(self._scale)
+        inner.append(self._pct_lbl)
+
+    def _sync_percent(self):
+        if getattr(self, "_pct_lbl", None) is not None:
+            self._pct_lbl.set_label(f"{round(self._scale.get_value() * 100):d}%")
 
     def set_volume(self, value):
         with GObject.signal_handler_block(self._scale, self._scale_handler):
             self._scale.set_value(max(0.0, min(1.0, value)))
+        # The changed handler is blocked above, so the readout is updated here.
+        self._sync_percent()
 
     def set_muted(self, muted):
         with GObject.signal_handler_block(self._mute_btn, self._mute_handler):
@@ -825,6 +888,7 @@ class MixCell(Gtk.Box):
         )
 
     def _on_value_changed(self, scale):
+        self._sync_percent()
         self.emit("volume-changed", scale.get_value())
 
     def _on_mute_toggled(self, btn):

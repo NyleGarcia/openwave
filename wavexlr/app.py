@@ -76,6 +76,7 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         self._mixes = mixes_module.load_seeded()
 
         self._build_ui()
+        self._restore_gain_lock()
         self._update_service_status()
         self.mixer = Mixer()
         self.mixer.set_mixes(self._mixes)
@@ -100,16 +101,33 @@ class WaveXLRWindow(Adw.ApplicationWindow):
 
     # Remembered across sessions: the right size depends on how many mixes and
     # sources the user keeps, which only they know.
-    _WINDOW_STATE = os.path.expanduser("~/.config/openwave/window.json")
+    _UI_STATE = os.path.expanduser("~/.config/openwave/ui-state.json")
 
-    def _restore_window_size(self):
+    def _on_gain_lock_toggled(self, btn):
+        locked = btn.get_active()
+        self.gain_scale.set_sensitive(not locked)
+        btn.set_icon_name(
+            "changes-prevent-symbolic" if locked else "changes-allow-symbolic"
+        )
+        btn.set_tooltip_text("Gain locked \u2014 click to unlock" if locked
+                             else "Lock gain")
+        self._save_ui_state()
+
+    def _restore_gain_lock(self):
+        state = self._load_ui_state()
+        if state.get("gain_locked"):
+            self.gain_lock.set_active(True)   # toggled fires and applies it
+
+    def _load_ui_state(self):
         try:
-            with open(self._WINDOW_STATE) as f:
+            with open(self._UI_STATE) as f:
                 state = json.load(f)
         except (OSError, ValueError):
-            return
-        if not isinstance(state, dict):
-            return
+            return {}
+        return state if isinstance(state, dict) else {}
+
+    def _restore_window_size(self):
+        state = self._load_ui_state()
         width, height = state.get("width"), state.get("height")
         if isinstance(width, int) and isinstance(height, int) \
                 and width >= 820 and height >= 480:
@@ -117,31 +135,32 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         if state.get("maximized"):
             self.maximize()
 
-    def _save_window_size(self):
-        """Store the current size. Never fatal: a window that cannot record
-        its geometry should still close."""
+    def _save_ui_state(self):
+        """Store window geometry and the gain lock.
+
+        Never fatal: a window that cannot record its state should still close,
+        and a lock toggle that cannot persist should still take effect now.
+        """
         try:
-            os.makedirs(os.path.dirname(self._WINDOW_STATE), exist_ok=True)
+            os.makedirs(os.path.dirname(self._UI_STATE), exist_ok=True)
             state = {
                 "width": self.get_width(),
                 "height": self.get_height(),
                 "maximized": self.is_maximized(),
+                "gain_locked": bool(
+                    getattr(self, "gain_lock", None) and self.gain_lock.get_active()
+                ),
             }
             if state["maximized"]:
                 # get_width/height report the maximized size; keep the last
                 # restored size so unmaximizing does not snap to full screen.
-                previous = {}
-                try:
-                    with open(self._WINDOW_STATE) as f:
-                        previous = json.load(f)
-                except (OSError, ValueError):
-                    pass
+                previous = self._load_ui_state()
                 state["width"] = previous.get("width", state["width"])
                 state["height"] = previous.get("height", state["height"])
-            tmp = self._WINDOW_STATE + ".tmp"
+            tmp = self._UI_STATE + ".tmp"
             with open(tmp, "w") as f:
                 json.dump(state, f, indent=2)
-            os.replace(tmp, self._WINDOW_STATE)
+            os.replace(tmp, self._UI_STATE)
         except OSError:
             pass
 
@@ -184,7 +203,9 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         self.sidebar_toggle = Gtk.ToggleButton(
             icon_name="sidebar-show-symbolic",
             tooltip_text="Toggle device panel",
-            active=True,
+            # Closed by default: the matrix is the thing you came for, and the
+            # device controls are set once and then left alone.
+            active=False,
         )
         header.pack_end(self.sidebar_toggle)
         box.append(header)
@@ -238,7 +259,9 @@ class WaveXLRWindow(Adw.ApplicationWindow):
                 has_level=True,
                 removable=True,
                 editable=True,
+                reorderable=True,
             )
+            self._wire_source_row(source_id)
 
         self.matrix.connect("add-source-clicked", self._on_add_source_clicked)
         self.matrix.connect("remove-source-clicked", self._on_remove_source_clicked)
@@ -282,6 +305,17 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         self.gain_label = Gtk.Label(label="—", width_chars=8, xalign=1)
         self.gain_label.add_css_class("monospace")
         gain_row.add_suffix(self.gain_label)
+
+        # Preamp gain is set once and then wants leaving alone: a stray scroll
+        # over the slider silently changes how loud you are to everyone else,
+        # and nothing on screen makes that obvious afterwards.
+        self.gain_lock = Gtk.ToggleButton(
+            icon_name="changes-allow-symbolic", valign=Gtk.Align.CENTER,
+            tooltip_text="Lock gain",
+        )
+        self.gain_lock.add_css_class("flat")
+        self.gain_lock.connect("toggled", self._on_gain_lock_toggled)
+        gain_row.add_suffix(self.gain_lock)
         mic_group.add(gain_row)
 
         self.gain_scale = Gtk.Scale(
@@ -995,13 +1029,40 @@ class WaveXLRWindow(Adw.ApplicationWindow):
             has_level=True,
             removable=True,
             editable=True,
+            reorderable=True,
         )
+        self._wire_source_row(source["id"])
         for mix_id in self._mixes:
             self._wire_cell(source["id"], mix_id)
         self.mixer.set_sources(self._sources)
         self.mixer.poll_streams()
         self._refresh_source_meter(source["id"])
         self._refresh_mix_emptiness()
+
+    def _wire_source_row(self, source_id):
+        """Connect a source row's own level slider and mute.
+
+        Distinct from the mix cells beside it: this is the source's level
+        everywhere, applied to its intake sink ahead of the per-mix faders.
+        """
+        cell = self.matrix.source(source_id)
+        if cell is None:
+            return
+        source = self._sources.get(source_id, {})
+        cell.set_volume(float(source.get("level", 1.0)))
+        cell.set_muted(bool(source.get("muted", False)))
+        cell.connect("volume-changed", self._on_source_level_changed, source_id)
+        cell.connect("mute-toggled", self._on_source_mute_toggled, source_id)
+
+    def _on_source_level_changed(self, _cell, volume, source_id):
+        self.mixer.set_source_level(
+            source_id, volume, self._sources.get(source_id, {}).get("muted", False))
+        sources_module.save(self._sources)
+
+    def _on_source_mute_toggled(self, _cell, muted, source_id):
+        self.mixer.set_source_level(
+            source_id, self._sources.get(source_id, {}).get("level", 1.0), muted)
+        sources_module.save(self._sources)
 
     def _on_move_source_clicked(self, _matrix, source_id, delta):
         before = list(self._sources)
@@ -1011,6 +1072,8 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         # Every MixCell is rebuilt by the reorder, so the cells must be wired
         # again: the old widgets are gone and the new ones carry no state.
         self.matrix.reorder_sources(list(self._sources))
+        for sid in self._sources:
+            self._wire_source_row(sid)
         self._wire_matrix_cells()
         self._refresh_mix_emptiness()
         self._start_meters()
@@ -1178,7 +1241,7 @@ class WaveXLRApp(Adw.Application):
         """Stop polling, drop the USB link, and tear down loopback + meter
         subprocesses before the process exits."""
         if self._window is not None:
-            self._window._save_window_size()
+            self._window._save_ui_state()
             self._window._stop_polling()
             if hasattr(self._window, "meter"):
                 self._window.meter.stop_all()

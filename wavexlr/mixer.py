@@ -1194,6 +1194,33 @@ class Mixer:
             for mix_id in mix_ids
         )
 
+    def set_source_level(self, source_id, volume, muted):
+        """A source's overall level: the volume of its intake sink.
+
+        Applies to that source in every mix at once, ahead of the per-mix
+        faders -- a channel trim rather than a send. Persisted on the source
+        record so it is restored deterministically rather than depending on
+        WirePlumber having remembered the sink.
+        """
+        with self._lock:
+            source = self._sources.get(source_id)
+            if source is not None:
+                source["level"] = max(0.0, min(1.0, float(volume)))
+                source["muted"] = bool(muted)
+        self._enqueue(
+            ("srclevel", source_id),
+            lambda sid=source_id: self._do_apply_source_level(sid),
+        )
+
+    def _do_apply_source_level(self, source_id):
+        with self._lock:
+            source = dict(self._sources.get(source_id) or {})
+        node_id = _node_id_by_name(source_sink_name(source_id))
+        if node_id is None:
+            return          # not routed, so no intake to set
+        _wpctl("set-volume", node_id, f"{float(source.get('level', 1.0)):.3f}")
+        _wpctl("set-mute", node_id, "1" if source.get("muted") else "0")
+
     def _ensure_source_sink(self, source_id, description):
         """Create the source's intake sink if it is not already live."""
         from . import setup
@@ -1202,7 +1229,11 @@ class Mixer:
             setup.create_null_sink(name, f"OpenWave: {description}")
         except Exception:
             return None
-        self._intakes.add(source_id)
+        if source_id not in self._intakes:
+            self._intakes.add(source_id)
+            # A freshly created sink is at unity and unmuted; push the stored
+            # level onto it so the slider means something immediately.
+            self._do_apply_source_level(source_id)
         return name
 
     def _destroy_source_sink(self, source_id):
