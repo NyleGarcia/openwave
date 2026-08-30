@@ -1,0 +1,107 @@
+# Flatpak manifest — EXPERIMENTAL.
+#
+# Build:
+#   flatpak install --user flathub org.flatpak.Builder org.gnome.Platform//48 org.gnome.Sdk//48
+#   flatpak run org.flatpak.Builder --user --install --force-clean build-dir \
+#       packaging/flatpak/com.github.openwave.yml
+#
+# What works in the sandbox and what cannot:
+#
+# - USB control needs --device=all: OpenWave speaks raw libusb, and there
+#   is no portal for vendor control transfers. Host udev rules are still
+#   what grants the permission — the sandbox cannot install them, so run
+#   the udev step once outside (see docs/hardware-support.md) or install
+#   any native package first.
+# - The mixing matrix drives the HOST PipeWire through its socket; the
+#   pw-* / wpctl / pactl tools the mixer shells out to are bundled below
+#   so they exist inside the sandbox.
+# - First-run setup (pkexec udev + service install) cannot run sandboxed
+#   and is skipped; the capture-fix daemon must come from a native
+#   install or not at all. The GUI itself is fully functional without it
+#   on hardware that does not hit the firmware race.
+#
+# In short: the Flatpak is the control panel + matrix; the system pieces
+# stay native. Prefer a native package where one exists.
+
+app-id: com.github.openwave
+runtime: org.gnome.Platform
+runtime-version: "48"
+sdk: org.gnome.Sdk
+command: openwave
+
+finish-args:
+  - --share=ipc
+  - --socket=wayland
+  - --socket=fallback-x11
+  # Raw libusb control transfers; also /dev/snd for amixer.
+  - --device=all
+  # The host PipeWire graph is the whole point.
+  - --filesystem=xdg-run/pipewire-0
+  - --socket=pulseaudio
+  # ALSA card topology (amixer numids, usbid matching).
+  - --filesystem=/proc/asound:ro
+  # Generated PipeWire/WirePlumber user config, autostart + drawer entries.
+  - --filesystem=xdg-config/pipewire:create
+  - --filesystem=xdg-config/wireplumber:create
+  - --filesystem=xdg-config/autostart:create
+  - --filesystem=xdg-data/applications:create
+  # Tray.
+  - --talk-name=org.kde.StatusNotifierWatcher
+
+modules:
+  # amixer — the ALSA sync path shells out to it.
+  - name: alsa-utils
+    sources:
+      - type: git
+        url: https://github.com/alsa-project/alsa-utils.git
+        tag: v1.2.13
+        commit: f04b9e0f1285fe25d4146906c5a8511741b8abad
+    config-opts:
+      - --disable-alsamixer
+      - --disable-xmlto
+      - --disable-nls
+
+  # pw-cat, pw-cli, pw-dump, pw-link, pw-loopback — the router's hands.
+  - name: pipewire-tools
+    buildsystem: meson
+    config-opts:
+      - -Dsession-managers=[]
+      - -Dexamples=disabled
+      - -Dtests=disabled
+      - -Dgstreamer=disabled
+      - -Dsystemd=disabled
+      - -Dudevrulesdir=/app/lib/udev/rules.d
+    sources:
+      - type: git
+        url: https://gitlab.freedesktop.org/pipewire/pipewire.git
+        tag: "1.4.2"
+        commit: d20a1523b6770dfa93a270bdda5d7c800d7ec191
+
+  # wpctl — volumes are written through it.
+  - name: wireplumber
+    buildsystem: meson
+    config-opts:
+      - -Dsystemd=disabled
+      - -Delogind=disabled
+      - -Ddoc=disabled
+      - -Dintrospection=disabled
+      - -Dtests=disabled
+    sources:
+      - type: git
+        url: https://gitlab.freedesktop.org/pipewire/wireplumber.git
+        tag: "0.5.10"
+        commit: 7a4d3177550b6b53fe0a49396da5b07f5353daff
+
+  - name: openwave
+    buildsystem: simple
+    build-commands:
+      # SITEPKG must land under /app (the interpreter's own site-packages
+      # is the read-only runtime), and /app/lib/pythonX.Y/site-packages is
+      # on the runtime python's default path.
+      - >-
+        make install PREFIX=/app PYTHON=python3
+        SITEPKG=/app/lib/python$(python3 -c "import sys;
+        print('%d.%d' % sys.version_info[:2])")/site-packages
+    sources:
+      - type: dir
+        path: ../..

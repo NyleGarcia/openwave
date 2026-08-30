@@ -28,6 +28,9 @@ versions are git tags (see [Releases](../../releases)).
   pair with USB handles by serial (node-stem fallback when a serial will
   not read), so two units of one model each follow their own row, and
   only state *changes* propagate, so the pair cannot loop.
+- **Experimental Flatpak manifest** (`packaging/flatpak/`): the control
+  panel and matrix in a sandbox, driving the host PipeWire; udev rules,
+  first-run setup and the capture-fix daemon remain native-only.
 - **Devices are discovered while running**: a Wave plugged in
   mid-session — or plugged back in after its row was removed — gets its
   row within seconds instead of on the next launch.

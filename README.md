@@ -207,6 +207,25 @@ them declaratively:
 services.udev.packages = [ openwave ];
 ```
 
+### Flatpak (experimental)
+
+A manifest lives at
+[`packaging/flatpak/com.github.openwave.yml`](packaging/flatpak/com.github.openwave.yml):
+
+```bash
+flatpak install --user flathub org.flatpak.Builder org.gnome.Platform//48 org.gnome.Sdk//48
+flatpak run org.flatpak.Builder --user --install --force-clean build-dir \
+    packaging/flatpak/com.github.openwave.yml
+```
+
+Know the limits before choosing it: the sandbox cannot install udev rules
+(grant USB access once from a native install or by hand — see
+[docs/hardware-support.md](docs/hardware-support.md)) and cannot run the
+first-run setup or the capture-fix daemon, so those stay native. The
+manifest bundles the `pw-*`/`wpctl`/`amixer` tools the mixer shells out
+to and drives the host PipeWire through its socket. Prefer a native
+package where one exists.
+
 ### Uninstall
 
 ```bash
