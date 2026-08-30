@@ -67,9 +67,11 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         self._poll_id = None
         self._stream_poll_id = None
         self._device_poll_countdown = self._DEVICE_POLL_EVERY
-        self._gain_timeout = None
-        self._hp_timeout = None
-        self._mix_timeout = None
+        # One pacer for every device slider. 80 ms leading+periodic+trailing,
+        # so the hardware tracks during a drag instead of hearing about it
+        # 200 ms after the drag stops.
+        from .scheduler import GLibScheduler, Throttler
+        self._throttle = Throttler(GLibScheduler(), 0.08)
         # Debounce slider events to coalesce a flurry of value-changed signals
         # during a drag into one set_cell. {(source_id, mix_id): timeout_id}.
         self._cell_debounce_ids = {}
@@ -690,29 +692,20 @@ class WaveXLRWindow(Adw.ApplicationWindow):
             return
         val = int(scale.get_value())
         self.gain_label.set_label(self._format_gain(val))
-        # Debounce — only send after slider stops moving for 200ms
-        if hasattr(self, '_gain_timeout') and self._gain_timeout:
-            GLib.source_remove(self._gain_timeout)
-        self._gain_timeout = GLib.timeout_add(200, self._send_gain, val)
+        self._throttle.push("gain", val, self._send_gain)
 
     def _send_gain(self, val):
-        self._gain_timeout = None
         self._usb_async(lambda: self.dev.set_gain_raw(val), on_error=self._on_usb_error)
-        return False
 
     def _on_hp_changed(self, scale):
         if self._updating_ui or not self.dev.connected:
             return
         db = scale.get_value()
         self.hp_label.set_label(f"{db:.1f} dB")
-        if hasattr(self, '_hp_timeout') and self._hp_timeout:
-            GLib.source_remove(self._hp_timeout)
-        self._hp_timeout = GLib.timeout_add(200, self._send_hp, db)
+        self._throttle.push("hp", db, self._send_hp)
 
     def _send_hp(self, db):
-        self._hp_timeout = None
         self._usb_async(lambda: self.dev.set_hp_volume_db(db), on_error=self._on_usb_error)
-        return False
 
     # ----- per-mix output routing (shown in each column header's menu) -----
     def _output_entries(self, mix_id, sinks, default_sink):
@@ -908,14 +901,10 @@ class WaveXLRWindow(Adw.ApplicationWindow):
             return
         val = int(scale.get_value())
         self.mix_label.set_label(f"{val / 256:.0f}%")
-        if self._mix_timeout:
-            GLib.source_remove(self._mix_timeout)
-        self._mix_timeout = GLib.timeout_add(200, self._send_mix, val)
+        self._throttle.push("mix", val, self._send_mix)
 
     def _send_mix(self, val):
-        self._mix_timeout = None
         self._usb_async(lambda: self.dev.set_monitor_mix(val), on_error=self._on_usb_error)
-        return False
 
     def _on_mic_matrix_volume_changed(self, _source, value):
         if self._updating_ui or not self.dev.connected:
@@ -925,9 +914,7 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         self._updating_ui = True
         self.gain_scale.set_value(raw)
         self._updating_ui = False
-        if self._gain_timeout:
-            GLib.source_remove(self._gain_timeout)
-        self._gain_timeout = GLib.timeout_add(200, self._send_gain, raw)
+        self._throttle.push("gain", raw, self._send_gain)
 
     def _on_mic_matrix_mute_toggled(self, _source, muted):
         if self._updating_ui or not self.dev.connected:
