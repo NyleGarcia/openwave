@@ -16,7 +16,7 @@ import atexit
 import os
 import tempfile
 
-from wavexlr import mixer, mixes, sources
+from wavexlr import mixer, mixes, scenes, sources
 
 _SANDBOX = tempfile.TemporaryDirectory(prefix="openwave-tests-")
 atexit.register(_SANDBOX.cleanup)
@@ -24,4 +24,5 @@ atexit.register(_SANDBOX.cleanup)
 sources.CONFIG_PATH = os.path.join(_SANDBOX.name, "sources.json")
 mixes.CONFIG_PATH = os.path.join(_SANDBOX.name, "mixdefs.json")
 mixer.CONFIG_PATH = os.path.join(_SANDBOX.name, "mixes.json")
+scenes.CONFIG_PATH = os.path.join(_SANDBOX.name, "scenes.json")
 mixer.Mixer._TRACE_PATH = os.path.join(_SANDBOX.name, "write-trace.log")

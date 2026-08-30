@@ -1238,6 +1238,98 @@ class Mixer:
             self._state[VOLUMES_STATE_KEY] = volumes
         return volumes
 
+    def scene_state(self):
+        """Everything a scene snapshots, read from live state.
+
+        Live rather than stored on principle (the mix-master rule): whatever
+        moved a level — this window, a Stream Deck, pavucontrol — the value it
+        left is the one the scene should hold.
+        """
+        with self._lock:
+            sources = {
+                sid: {
+                    "level": float(s.get("level", 1.0)),
+                    "muted": bool(s.get("muted", False)),
+                }
+                for sid, s in self._sources.items()
+            }
+            mix_ids = list(self._mixes)
+        state = {
+            "sources": sources,
+            "cells": {k: dict(v) for k, v in self.cells().items()},
+            "outputs": {mid: self.get_output(mid) for mid in mix_ids},
+            "volumes": {},
+        }
+        for mid in mix_ids:
+            remembered = self.mix_volume(mid)
+            if remembered is not None:
+                volume, muted = remembered
+                state["volumes"][mid] = {"volume": volume, "muted": muted}
+        return state
+
+    def apply_scene(self, scene):
+        """Set the matrix to a scene's levels. Returns what was skipped.
+
+        Partial apply is normal, not an error: a scene naming a source or mix
+        that no longer exists sets what still matches and reports the rest.
+        Nothing is created or deleted — a scene is levels, not structure.
+        """
+        skipped = []
+        with self._lock:
+            known_sources = set(self._sources)
+            known_mixes = set(self._mixes)
+            sinks = {mid: m.get("sink") for mid, m in self._mixes.items()}
+
+        for sid, entry in (scene.get("sources") or {}).items():
+            if sid not in known_sources:
+                skipped.append(f"source {sid}")
+                continue
+            self.set_source_level(
+                sid, entry.get("level", 1.0), entry.get("muted", False))
+
+        for key, cell in (scene.get("cells") or {}).items():
+            sid, _, mid = key.rpartition(".")
+            if sid not in known_sources or mid not in known_mixes:
+                skipped.append(f"cell {key}")
+                continue
+            self.set_cell(sid, mid, cell.get("volume", 0.0),
+                          cell.get("muted", False))
+
+        for mid, choice in (scene.get("outputs") or {}).items():
+            if mid not in known_mixes:
+                skipped.append(f"output {mid}")
+                continue
+            self.set_output(mid, choice)
+
+        for mid, entry in (scene.get("volumes") or {}).items():
+            sink = sinks.get(mid)
+            if mid not in known_mixes or not sink:
+                skipped.append(f"volume {mid}")
+                continue
+            volume = max(0.0, min(1.0, float(entry.get("volume", 1.0))))
+            muted = bool(entry.get("muted", False))
+            self._pw.set_sink_volume(sink, volume)
+            self._pw.set_sink_mute(sink, muted)
+            self.remember_mix_volume(mid, volume, muted)
+        return skipped
+
+    def set_mix_volume(self, mix_id, volume):
+        """Set a mix master from the UI: the sink volume, remembered.
+
+        The same pair of writes an external mover triggers implicitly —
+        volume onto the sink, value into the store — so a slider in the
+        header and a media key are indistinguishable downstream.
+        """
+        with self._lock:
+            sink = (self._mixes.get(mix_id) or {}).get("sink")
+        if not sink:
+            return
+        volume = max(0.0, min(1.0, float(volume)))
+        remembered = self.mix_volume(mix_id)
+        muted = remembered[1] if remembered else False
+        self._pw.set_sink_volume(sink, volume)
+        self.remember_mix_volume(mix_id, volume, muted)
+
     def mix_volume(self, mix_id):
         """The remembered (volume, muted) for a mix, or None if unseen."""
         with self._lock:
