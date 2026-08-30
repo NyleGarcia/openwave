@@ -15,10 +15,10 @@ bug. Resolving at draw time leaves the user's choice intact, follows a theme
 change in either direction, and needs no migration.
 """
 
-import gi
-
-gi.require_version("Gtk", "4.0")
-from gi.repository import Gdk, Gtk  # noqa: E402
+# gi is imported inside _theme(), not here: resolve() is called from GTK
+# code, but the module is imported wherever icon names are handled, including
+# headless contexts (the test runner installs no PyGObject at all), and the
+# no-display path must work without it.
 
 # Preferred name -> names to try when the active theme does not have it, best
 # first. Every alternative here was checked against Breeze; the preferred name
@@ -62,6 +62,12 @@ _watched = False
 def _theme():
     """The display's icon theme, or None when there is no display yet."""
     global _watched
+    try:
+        import gi
+        gi.require_version("Gtk", "4.0")
+        from gi.repository import Gdk, Gtk
+    except (ImportError, ValueError):
+        return None
     display = Gdk.Display.get_default()
     if display is None:
         return None

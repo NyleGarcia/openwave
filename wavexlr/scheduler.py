@@ -22,29 +22,37 @@ Interface (duck-typed):
 
 import threading
 
-from gi.repository import GLib
+# GLib is imported inside GLibScheduler, not here: the Throttler is pure
+# Python and gets exercised on runners that install no PyGObject at all,
+# and a module-level import would take it down with the production half.
 
 
 class GLibScheduler:
     """Production scheduler: GLib timeouts + worker threads marshalled via idle_add."""
 
+    def __init__(self):
+        from gi.repository import GLib
+        self._glib = GLib
+
     def run_async(self, fn, on_done=None, on_error=None):
+        glib = self._glib
+
         def _worker():
             try:
                 result = fn()
                 if on_done is not None:
-                    GLib.idle_add(on_done, result)
+                    glib.idle_add(on_done, result)
             except Exception as e:
                 if on_error is not None:
-                    GLib.idle_add(on_error, e)
+                    glib.idle_add(on_error, e)
         threading.Thread(target=_worker, daemon=True).start()
 
     def call_every(self, interval_s, fn):
-        return GLib.timeout_add(int(interval_s * 1000), fn)
+        return self._glib.timeout_add(int(interval_s * 1000), fn)
 
     def cancel(self, handle):
         if handle is not None:
-            GLib.source_remove(handle)
+            self._glib.source_remove(handle)
 
 
 class Throttler:

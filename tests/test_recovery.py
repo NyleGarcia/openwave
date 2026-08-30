@@ -10,6 +10,16 @@ import unittest
 
 from wavexlr import recovery
 
+
+def _has_gi():
+    try:
+        import gi  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+
 DOCK = ("alsa_input.usb-Elgato_Systems_Elgato_XLR_Dock_A8A9A40411NOP9-00"
         ".mono-fallback")
 
@@ -162,6 +172,7 @@ if __name__ == "__main__":
     unittest.main()
 
 
+@unittest.skipUnless(_has_gi(), "PyGObject not available")
 class MeterSilence(unittest.TestCase):
     """`silent_for` is the input the whole decision rests on."""
 
@@ -197,8 +208,15 @@ class MeterSilence(unittest.TestCase):
         self.assertIsNone(self.meter.silent_for("dock"))
 
 
+@unittest.skipUnless(_has_gi(), "PyGObject not available")
 class TrayHostProbe(unittest.TestCase):
-    """Whether a tray exists decides whether hiding the window is safe."""
+    """Whether a tray exists decides whether hiding the window is safe.
+
+    Skipped without PyGObject: the probe under test answers a D-Bus call,
+    which cannot even be faked without GLib.Variant. This class has been the
+    one red light on a runner that deliberately installs no GTK -- since the
+    probe was written, not noticed because every dev machine has gi.
+    """
 
     def _probe(self, answer):
         import gi
