@@ -172,9 +172,14 @@ class WaveXLRWindow(Adw.ApplicationWindow):
                     getattr(self, "gain_lock", None) and self.gain_lock.get_active()
                 ),
             }
-            if state["maximized"]:
-                # get_width/height report the maximized size; keep the last
-                # restored size so unmaximizing does not snap to full screen.
+            if state["maximized"] or state["width"] <= 0 or state["height"] <= 0:
+                # Two windows lie about their size: a maximized one reports
+                # the screen, and a hidden one reports 0x0 -- which is what
+                # this window is when quit arrives via the tray, since
+                # closing hid it first. Writing the zeros through destroyed
+                # the remembered geometry, and the restore guard then fell
+                # back to GTK's minimum: a cramped window that clips the
+                # matrix. Keep the last honest answer instead.
                 previous = self._load_ui_state()
                 state["width"] = previous.get("width", state["width"])
                 state["height"] = previous.get("height", state["height"])
