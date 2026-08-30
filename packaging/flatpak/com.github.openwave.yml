@@ -25,7 +25,7 @@
 
 app-id: com.github.openwave
 runtime: org.gnome.Platform
-runtime-version: "48"
+runtime-version: "49"
 sdk: org.gnome.Sdk
 command: openwave
 
@@ -38,8 +38,6 @@ finish-args:
   # The host PipeWire graph is the whole point.
   - --filesystem=xdg-run/pipewire-0
   - --socket=pulseaudio
-  # ALSA card topology (amixer numids, usbid matching).
-  - --filesystem=/proc/asound:ro
   # Generated PipeWire/WirePlumber user config, autostart + drawer entries.
   - --filesystem=xdg-config/pipewire:create
   - --filesystem=xdg-config/wireplumber:create
@@ -49,6 +47,31 @@ finish-args:
   - --talk-name=org.kde.StatusNotifierWatcher
 
 modules:
+  # The GNOME runtime ships no libusb, and raw libusb IS the device layer.
+  - name: libusb
+    sources:
+      - type: git
+        url: https://github.com/libusb/libusb.git
+        tag: v1.0.29
+        commit: 15a7ebb4d426c5ce196684347d2b7cafad862626
+      - type: shell
+        commands:
+          - autoreconf -fiv
+    config-opts:
+      - --disable-udev
+
+  # alsa-utils insists on a libasound at least its own version, and the
+  # runtime's is older — build the matching one first.
+  - name: alsa-lib
+    sources:
+      - type: git
+        url: https://github.com/alsa-project/alsa-lib.git
+        tag: v1.2.13
+        commit: 785fd327ada6fc1778a2bb21176cb66705eb6b33
+      - type: shell
+        commands:
+          - autoreconf -fiv
+
   # amixer — the ALSA sync path shells out to it.
   - name: alsa-utils
     sources:
@@ -56,10 +79,15 @@ modules:
         url: https://github.com/alsa-project/alsa-utils.git
         tag: v1.2.13
         commit: f04b9e0f1285fe25d4146906c5a8511741b8abad
+      # The git tree ships gitcompile, not autogen.sh; make configure exist.
+      - type: shell
+        commands:
+          - autoreconf -fiv
     config-opts:
       - --disable-alsamixer
       - --disable-xmlto
       - --disable-nls
+      - --with-udev-rules-dir=/app/lib/udev/rules.d
 
   # pw-cat, pw-cli, pw-dump, pw-link, pw-loopback — the router's hands.
   - name: pipewire-tools
@@ -77,6 +105,34 @@ modules:
         tag: "1.4.2"
         commit: d20a1523b6770dfa93a270bdda5d7c800d7ec191
 
+  # wireplumber embeds Lua, the runtime has none, and offline builds
+  # cannot fetch its wrap subproject.
+  - name: lua
+    buildsystem: simple
+    build-commands:
+      - make -C src all CC=cc MYCFLAGS="-fPIC -DLUA_USE_LINUX" MYLIBS="-ldl"
+      - make install INSTALL_TOP=/app
+      # Lua's makefile ships no .pc, and pkg-config is how meson looks.
+      - |
+        mkdir -p /app/lib/pkgconfig
+        for name in lua lua-5.4 lua5.4; do
+          cat > /app/lib/pkgconfig/${name}.pc <<'EOF'
+        prefix=/app
+        libdir=${prefix}/lib
+        includedir=${prefix}/include
+
+        Name: Lua
+        Description: Lua language engine
+        Version: 5.4.8
+        Libs: -L${libdir} -llua -lm -ldl
+        Cflags: -I${includedir}
+        EOF
+        done
+    sources:
+      - type: archive
+        url: https://www.lua.org/ftp/lua-5.4.8.tar.gz
+        sha256: 4f18ddae154e793e46eeab727c59ef1c0c0c2b744e7b94219710d76f530629ae
+
   # wpctl — volumes are written through it.
   - name: wireplumber
     buildsystem: meson
@@ -85,7 +141,8 @@ modules:
       - -Delogind=disabled
       - -Ddoc=disabled
       - -Dintrospection=disabled
-      - -Dtests=disabled
+      - -Dtests=false
+      - -Dsystem-lua=true
     sources:
       - type: git
         url: https://gitlab.freedesktop.org/pipewire/wireplumber.git

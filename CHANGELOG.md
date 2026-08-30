@@ -32,9 +32,16 @@ versions are git tags (see [Releases](../../releases)).
   checkout-first, what layering is actually needed for, why the sandbox
   and the immutable `/usr` change nothing for udev or the user service,
   and the manual udev step for the Flatpak path.
-- **Experimental Flatpak manifest** (`packaging/flatpak/`): the control
-  panel and matrix in a sandbox, driving the host PipeWire; udev rules,
-  first-run setup and the capture-fix daemon remain native-only.
+- **An rpm with every release**: noarch, built by the release workflow,
+  module under /usr/share/openwave with PYTHONPATH launchers so one
+  package serves every Fedora python. Validated end-to-end by a CI
+  dry-run.
+- **Flatpak manifest** (`packaging/flatpak/`), built and smoke-tested:
+  GNOME 49 runtime, bundling libusb, alsa-lib/utils, the PipeWire tools,
+  Lua and WirePlumber's wpctl; the app boots sandboxed with its full
+  D-Bus surface. First-run setup knows it is sandboxed and points at the
+  host udev step instead of crashing into a pkexec that is not there;
+  the capture-fix daemon remains native-only.
 - **Devices are discovered while running**: a Wave plugged in
   mid-session — or plugged back in after its row was removed — gets its
   row within seconds instead of on the next launch.

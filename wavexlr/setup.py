@@ -21,6 +21,12 @@ UDEV_RULES = tuple(
 UDEV_PATH = "/etc/udev/rules.d/99-openwave.rules"
 UDEV_PATH_OLD = "/etc/udev/rules.d/99-wavexlr.rules"
 
+# Inside a Flatpak sandbox there is no pkexec, no host /etc to read or
+# write, and no way to install anything system-side. First-run setup must
+# say so instead of crashing into the missing binary; the manifest's docs
+# carry the manual udev step.
+IN_FLATPAK = os.path.exists("/.flatpak-info")
+
 WIREPLUMBER_NAME = "51-openwave-wave-xlr.conf"
 WIREPLUMBER_PATH = os.path.expanduser(
     "~/.config/wireplumber/wireplumber.conf.d/" + WIREPLUMBER_NAME
@@ -41,6 +47,12 @@ def mixes_source():
 
 
 def udev_installed():
+    # The sandbox can neither read the host's rules nor install them, so
+    # the only non-crashing answers are "assume yes" and a permanent
+    # re-prompt for a setup that cannot run. Assume yes; a device that
+    # actually lacks the rule fails to open and the docs cover the fix.
+    if IN_FLATPAK:
+        return True
     for path in (UDEV_PATH, UDEV_PATH_OLD):
         try:
             with open(path) as f:
@@ -379,6 +391,10 @@ def _install_mixes_locked(mixes):
 
 def run_setup():
     """Run full first-time setup. Returns (success, message)."""
+    if IN_FLATPAK:
+        return False, ("Setup cannot run inside the Flatpak sandbox. "
+                       "Install the udev rules once on the host — see the "
+                       "Flatpak section of the README.")
     messages = []
 
     if not udev_installed():
