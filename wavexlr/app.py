@@ -1213,6 +1213,7 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         source = self._sources.get(source_id, {})
         cell.set_volume(float(source.get("level", 1.0)))
         cell.set_muted(bool(source.get("muted", False)))
+        self.matrix.set_source_group(source_id, sources_module.group(source))
         cell.connect("volume-changed", self._on_source_level_changed, source_id)
         cell.connect("mute-toggled", self._on_source_mute_toggled, source_id)
 
@@ -1302,10 +1303,8 @@ class WaveXLRWindow(Adw.ApplicationWindow):
             source.pop("match_app_name", None)
         self._sources = sources_module.update(self._sources, source_id, **fields)
 
-        cell = self.matrix.source(source_id)
-        if cell is not None:
-            cell.set_name(name)
-            cell.set_icon(icon_name)
+        self.matrix.set_source(source_id, name=name, icon_name=icon_name)
+        self.matrix.set_source_group(source_id, sources_module.group(source))
 
         if not is_device and binding != old_binding:
             # _refresh_app_meter early-returns when the cached target is still

@@ -271,6 +271,11 @@ class MixMatrix(Gtk.Box):
         self.emit("move-source-clicked", dragged, delta)
         return True
 
+    def set_source_group(self, source_id, group):
+        cell = self._sources.get(source_id)
+        if cell is not None and hasattr(cell, "set_group"):
+            cell.set_group(group)
+
     def set_source(self, source_id, *, name=None, icon_name=None):
         """Update a row's label, and the spec a rebuild restores it from.
 
@@ -681,6 +686,13 @@ class SourceCell(Gtk.Box):
         # controls beside it and renders as a bare ellipsis.
         self._name_lbl.set_width_chars(10)
         self._name_lbl.set_tooltip_text(name)
+
+        # Group badge. A grouping that is only visible by opening each row's
+        # edit dialog is a grouping nobody knows they have.
+        self._group_lbl = Gtk.Label(label="", xalign=0, visible=False)
+        self._group_lbl.add_css_class("openwave-group-badge")
+        self._group_lbl.add_css_class("caption")
+        text.append(self._group_lbl)
         self._name_lbl.add_css_class("heading")
         text.append(self._name_lbl)
 
@@ -760,6 +772,16 @@ class SourceCell(Gtk.Box):
             remove_btn.add_css_class("circular")
             remove_btn.connect("clicked", lambda _: self.emit("remove-clicked"))
             inner.append(remove_btn)
+
+    def set_group(self, group):
+        """Show which exclusivity group this row is in, if any."""
+        group = (group or "").strip()
+        self._group_lbl.set_label(f"\u2b24 {group}" if group else "")
+        self._group_lbl.set_visible(bool(group))
+        self._group_lbl.set_tooltip_text(
+            f"Only one source in \u201c{group}\u201d is live at a time"
+            if group else None
+        )
 
     def set_name(self, name):
         self._name_lbl.set_label(name)
