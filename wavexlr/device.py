@@ -43,8 +43,87 @@ _lib.libusb_control_transfer.argtypes = [
 ]
 _lib.libusb_control_transfer.restype = ctypes.c_int
 
+_lib.libusb_get_device_list.argtypes = [
+    ctypes.c_void_p, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p))]
+_lib.libusb_get_device_list.restype = ctypes.c_ssize_t
+_lib.libusb_free_device_list.argtypes = [
+    ctypes.POINTER(ctypes.c_void_p), ctypes.c_int]
+_lib.libusb_free_device_list.restype = None
+_lib.libusb_get_bus_number.argtypes = [ctypes.c_void_p]
+_lib.libusb_get_bus_number.restype = ctypes.c_uint8
+_lib.libusb_get_device_address.argtypes = [ctypes.c_void_p]
+_lib.libusb_get_device_address.restype = ctypes.c_uint8
+_lib.libusb_open.argtypes = [ctypes.c_void_p,
+                             ctypes.POINTER(ctypes.c_void_p)]
+_lib.libusb_open.restype = ctypes.c_int
+
+
+class _DeviceDescriptor(ctypes.Structure):
+    _fields_ = [
+        ("bLength", ctypes.c_uint8),
+        ("bDescriptorType", ctypes.c_uint8),
+        ("bcdUSB", ctypes.c_uint16),
+        ("bDeviceClass", ctypes.c_uint8),
+        ("bDeviceSubClass", ctypes.c_uint8),
+        ("bDeviceProtocol", ctypes.c_uint8),
+        ("bMaxPacketSize0", ctypes.c_uint8),
+        ("idVendor", ctypes.c_uint16),
+        ("idProduct", ctypes.c_uint16),
+        ("bcdDevice", ctypes.c_uint16),
+        ("iManufacturer", ctypes.c_uint8),
+        ("iProduct", ctypes.c_uint8),
+        ("iSerialNumber", ctypes.c_uint8),
+        ("bNumConfigurations", ctypes.c_uint8),
+    ]
+
+
+_lib.libusb_get_device_descriptor.argtypes = [
+    ctypes.c_void_p, ctypes.POINTER(_DeviceDescriptor)]
+_lib.libusb_get_device_descriptor.restype = ctypes.c_int
+
 _ctx = ctypes.c_void_p()
 _lib.libusb_init(ctypes.byref(_ctx))
+
+
+def _each_usb_device(visit):
+    """Call visit(vid, pid, bus, addr, dev_ptr) for every device on the bus.
+
+    The device list is freed before returning, so visit must open (ref) a
+    device it wants to keep, not stash the pointer.
+    """
+    devs = ctypes.POINTER(ctypes.c_void_p)()
+    count = _lib.libusb_get_device_list(_ctx, ctypes.byref(devs))
+    if count < 0:
+        return
+    try:
+        desc = _DeviceDescriptor()
+        for i in range(count):
+            dev = devs[i]
+            if _lib.libusb_get_device_descriptor(dev, ctypes.byref(desc)) != 0:
+                continue
+            visit(desc.idVendor, desc.idProduct,
+                  _lib.libusb_get_bus_number(dev),
+                  _lib.libusb_get_device_address(dev), dev)
+    finally:
+        _lib.libusb_free_device_list(devs, 1)
+
+
+def scan():
+    """Every supported Wave on the bus: [(profile, bus, addr)], bus order.
+
+    connect() opens only the first device of a vid:pid, which made a second
+    identical model invisible; this is how a caller sees them all.
+    """
+    by_id = {(p.vid, p.pid): p for p in PROFILES}
+    found = []
+
+    def visit(vid, pid, bus, addr, _dev):
+        profile = by_id.get((vid, pid))
+        if profile is not None:
+            found.append((profile, bus, addr))
+
+    _each_usb_device(visit)
+    return sorted(found, key=lambda e: (e[1], e[2]))
 
 
 def _find_card(matches, vid=None, pid=None, usbbus=None):
@@ -125,6 +204,39 @@ def _alsa_get(card):
             except ValueError:
                 pass
     return state
+
+
+def present_units():
+    """{(vid, pid, "bus/addr")} for every supported Wave on the bus.
+
+    Sysfs only — no USB permissions, no enumeration — cheap enough for a
+    periodic tick. The bus/addr string matches WaveDevice.usbbus, so the
+    caller can diff this against what it holds open and notice a unit
+    appearing or vanishing while others stay connected.
+    """
+    wanted = {(f"{p.vid:04x}", f"{p.pid:04x}") for p in PROFILES}
+    base = "/sys/bus/usb/devices"
+    units = set()
+    try:
+        entries = os.listdir(base)
+    except OSError:
+        return units
+    for entry in entries:
+        try:
+            with open(os.path.join(base, entry, "idVendor")) as f:
+                vid = f.read().strip()
+            with open(os.path.join(base, entry, "idProduct")) as f:
+                pid = f.read().strip()
+            if (vid, pid) not in wanted:
+                continue
+            with open(os.path.join(base, entry, "busnum")) as f:
+                bus = int(f.read().strip())
+            with open(os.path.join(base, entry, "devnum")) as f:
+                addr = int(f.read().strip())
+        except (OSError, ValueError):
+            continue
+        units.add((vid, pid, f"{bus:03d}/{addr:03d}"))
+    return units
 
 
 def wave_present():
@@ -269,34 +381,88 @@ class WaveDevice:
         self._card = None
         self._last_fw = None  # last known firmware state for change detection
         self.profile = None
+        self.usbbus = None    # "bus/addr" when opened via scan()
+        self.info = {}        # devinfo cache: fw/api/serial, filled by caller
+        self._alsa_tick = 0   # decimates the amixer reads inside get_all()
 
     @property
     def connected(self):
         return self._handle is not None
 
-    def connect(self):
-        for profile in PROFILES:
-            handle = _lib.libusb_open_device_with_vid_pid(_ctx, profile.vid, profile.pid)
+    def connect(self, profile=None, bus=None, addr=None):
+        """Open a Wave. With no arguments: the first supported device found.
+
+        With (profile, bus, addr) from scan(): that specific unit — which is
+        what lets two devices, even of the same model, each get their own
+        handle. bus/addr also pin the ALSA card via /proc/asound usbbus, so
+        two of one model cannot end up sharing a card either.
+        """
+        if profile is not None and bus is not None:
+            handle = self._open_at(profile, bus, addr)
             if handle:
                 self._handle = handle
                 self.profile = profile
+                self.usbbus = f"{bus:03d}/{addr:03d}"
                 self._card = _find_card(
-                profile.card_match, vid=profile.vid, pid=profile.pid,
-            )
+                    profile.card_match, vid=profile.vid, pid=profile.pid,
+                    usbbus=self.usbbus,
+                )
+                return
+            raise RuntimeError(
+                f"Could not open {profile.display_name} at {bus:03d}/{addr:03d}")
+
+        for prof in PROFILES:
+            handle = _lib.libusb_open_device_with_vid_pid(
+                _ctx, prof.vid, prof.pid)
+            if handle:
+                self._handle = handle
+                self.profile = prof
+                self._card = _find_card(
+                    prof.card_match, vid=prof.vid, pid=prof.pid,
+                )
                 return
         raise RuntimeError("No supported Elgato Wave device found")
 
+    @staticmethod
+    def _open_at(profile, bus, addr):
+        """A handle for the unit at (bus, addr), or None."""
+        handle = ctypes.c_void_p()
+
+        def visit(vid, pid, dbus, daddr, dev):
+            if handle.value:
+                return
+            if (vid, pid) == (profile.vid, profile.pid) \
+                    and (dbus, daddr) == (bus, addr):
+                opened = ctypes.c_void_p()
+                if _lib.libusb_open(dev, ctypes.byref(opened)) == 0:
+                    handle.value = opened.value
+
+        _each_usb_device(visit)
+        return handle.value and handle
+
     def disconnect(self):
-        if self._handle:
-            _lib.libusb_close(self._handle)
-            self._handle = None
+        # Under the transfer lock: closing a handle another thread is mid-
+        # control-transfer on is a use-after-free inside libusb. The poll
+        # worker and the device watch both touch devices concurrently now,
+        # so the close must wait its turn like any other USB operation.
+        with self._lock:
+            if self._handle:
+                _lib.libusb_close(self._handle)
+                self._handle = None
         self._card = None
         self._last_fw = None
+        self.usbbus = None
 
     def _ctrl_read(self, wValue, length):
         """USB control read — no detach needed."""
         buf = (ctypes.c_ubyte * length)()
         with self._lock:
+            # Checked INSIDE the lock: a multi-transfer operation releases it
+            # between transfers, and a disconnect (unplug handling) can slot
+            # in there. libusb does not NULL-check the handle — passing the
+            # cleared one was a hard SEGV, not an error return.
+            if self._handle is None:
+                raise RuntimeError("device disconnected")
             ret = _lib.libusb_control_transfer(
                 self._handle, RT_CLASS_IN, BREQUEST_READ, wValue, self.profile.windex,
                 buf, length, 1000,
@@ -310,6 +476,8 @@ class WaveDevice:
         data = bytes(data)
         buf = (ctypes.c_ubyte * len(data))(*data)
         with self._lock:
+            if self._handle is None:
+                raise RuntimeError("device disconnected")
             ret = _lib.libusb_control_transfer(
                 self._handle, RT_CLASS_OUT, BREQUEST_WRITE, wValue, self.profile.windex,
                 buf, len(data), 1000,
@@ -387,7 +555,15 @@ class WaveDevice:
 
         # Sync firmware ↔ ALSA
         if self._card:
-            alsa = _alsa_get(self._card)
+            # The firmware→ALSA direction below costs nothing while nothing
+            # changed, but reading ALSA back is two amixer subprocesses per
+            # call — at 10 Hz across two devices that was forty forks a
+            # second for values that almost never move. Read every 5th poll
+            # (0.5 s): pavucontrol moving the mic is still picked up
+            # promptly, and the physical controls keep their 10 Hz path.
+            self._alsa_tick = (self._alsa_tick + 1) % 5
+            read_alsa = self._alsa_tick == 0 or self._last_fw is None
+            alsa = _alsa_get(self._card) if read_alsa else {}
             dirty = False  # whether we need to write config back
 
             if self._last_fw is not None:
