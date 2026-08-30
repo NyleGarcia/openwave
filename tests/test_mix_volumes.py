@@ -98,11 +98,18 @@ class Restoring(unittest.TestCase):
             lambda s, v: self.applied.append(("volume", s, round(v, 3)))
         mixer_mod._pactl_set_sink_mute = \
             lambda s, m: self.applied.append(("mute", s, m))
+        self._live = mixer_mod._pactl_sink_volumes
+        mixer_mod._pactl_sink_volumes = lambda: {
+            "openwave_personal_mix": (1.0, False),
+            "openwave_chat_mix": (1.0, False),
+        }
         self.mixer = bare_mixer(_mixes=dict(MIXES))
+        self.mixer._volumes_restored = False
 
     def tearDown(self):
         mixer_mod._pactl_set_sink_volume = self._vol
         mixer_mod._pactl_set_sink_mute = self._mute
+        mixer_mod._pactl_sink_volumes = self._live
         self._ctx.__exit__(None, None, None)
 
     def test_it_puts_back_what_was_remembered(self):
@@ -201,10 +208,6 @@ class ReadingPactl(unittest.TestCase):
             self.assertIsInstance(self._parse(payload), dict)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class TheBootRace(unittest.TestCase):
     """The one that matters: at boot the sinks exist at unity before
     OpenWave does. An observation that lands before the restore persists that
@@ -257,3 +260,44 @@ class TheBootRace(unittest.TestCase):
         self.assertFalse(self.mixer.restore_mix_volumes())
         self.mixer.observe_mix_volumes()
         self.assertEqual(self.mixer.mix_volume("personal"), (0.62, False))
+
+    def test_the_gate_stays_shut_until_the_sinks_exist(self):
+        """The definitions can be loaded while the sinks still are not.
+
+        First run writes the PipeWire config, so the daemon creates the mix
+        sinks after OpenWave is already running; the same gap opens whenever
+        PipeWire is restarted under it. The restore writes into that gap and
+        pactl fails, silently -- _run_quiet does not even look at the return
+        code -- so the gate would open on a restore that did nothing, and the
+        next tick persists the unity the sinks then come up at.
+        """
+        mixer_mod._pactl_sink_volumes = lambda: {}      # not created yet
+        self.mixer.remember_mix_volume("personal", 0.62, False)
+        self.assertFalse(self.mixer.restore_mix_volumes())
+
+        # a moment later the daemon creates them, at unity
+        mixer_mod._pactl_sink_volumes = lambda: {
+            "openwave_personal_mix": (1.0, False)}
+        self.mixer.observe_mix_volumes()
+        self.assertEqual(self.mixer.mix_volume("personal"), (0.62, False))
+
+    def test_a_late_sink_is_restored_when_it_does_arrive(self):
+        """Shutting the gate is only right if something reopens it."""
+        mixer_mod._pactl_sink_volumes = lambda: {}
+        self.mixer.remember_mix_volume("personal", 0.62, False)
+        self.assertFalse(self.mixer.restore_mix_volumes())
+
+        mixer_mod._pactl_sink_volumes = lambda: {
+            "openwave_personal_mix": (1.0, False)}
+        self.assertTrue(self.mixer.restore_mix_volumes())
+        self.assertIn(("openwave_personal_mix", 0.62), self.applied)
+
+    def test_nothing_remembered_does_not_wait_for_a_sink(self):
+        """A first run has nothing to protect, and must still start
+        observing -- otherwise the first level a user sets is never saved."""
+        mixer_mod._pactl_sink_volumes = lambda: {}
+        self.assertTrue(self.mixer.restore_mix_volumes())
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -1014,6 +1014,11 @@ class Mixer:
             self._save_state()
         return True
 
+    @property
+    def volumes_restored(self):
+        """True once the masters have been put back and observing is safe."""
+        return self._volumes_restored
+
     def restore_mix_volumes(self):
         """Put the mix masters back to what they were. Returns True if done.
 
@@ -1029,6 +1034,23 @@ class Mixer:
             # shut, so no observation can run and persist the unity the
             # daemon just created the sinks at.
             return False
+        # Having the definitions is not the same as having the sinks. First
+        # run writes the PipeWire configuration, so the daemon creates them
+        # after OpenWave is already up, and a PipeWire restart reopens the
+        # same gap. Writing into it fails silently -- _run_quiet does not look
+        # at the return code -- so a restore that reached nothing would open
+        # the gate anyway and the next tick would persist the unity the sinks
+        # are about to appear at. Only a sink we actually mean to put a value
+        # back onto can hold the gate shut: one with nothing remembered has
+        # nothing to lose, and waiting on it would mean a first run never
+        # starts observing at all.
+        live = _pactl_sink_volumes()
+        for mix_id, mix in list(self._mixes.items()):
+            sink = mix.get("sink")
+            if not sink or self.mix_volume(mix_id) is None:
+                continue
+            if sink not in live:
+                return False
         for mix_id, mix in list(self._mixes.items()):
             sink = mix.get("sink")
             remembered = self.mix_volume(mix_id)

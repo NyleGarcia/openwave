@@ -187,6 +187,14 @@ def render_mixes_conf(mixes):
             "            audio.position    = [ FL FR ]\n"
             "            object.linger     = true\n"
             "            monitor.channel-volumes = true\n"
+            # A mix master is OpenWave's to remember. WirePlumber's
+            # restore-stream tracks these sinks on some setups (its
+            # stream-properties carries Audio/Sink entries for them) and
+            # re-applies its own last-seen level when the sink reappears --
+            # racing, and usually beating, the restore OpenWave does from
+            # mixes.json. One value wins on one boot and the other on the
+            # next, which reads as levels reverting at random.
+            "            state.restore-props = false\n"
             "        }\n"
             "    }\n"
         )

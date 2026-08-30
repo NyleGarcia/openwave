@@ -967,6 +967,12 @@ class WaveXLRWindow(Adw.ApplicationWindow):
 
     def _stream_poll_tick(self):
         self.mixer.poll_streams()
+        if not self.mixer.volumes_restored:
+            # _do_start restores once, and the mix sinks may not have existed
+            # yet when it did -- first run creates them, and a PipeWire
+            # restart recreates them. Retrying here is what reopens the gate;
+            # without it the masters stay at whatever the daemon made them.
+            self.mixer.restore_mix_volumes()
         self.mixer.observe_mix_volumes()
         self._device_poll_countdown -= 1
         check_devices = self._device_poll_countdown <= 0
