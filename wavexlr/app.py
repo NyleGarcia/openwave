@@ -1204,6 +1204,97 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         live = target_id if not target.get("muted") else dragged_id
         self._on_switch_source_clicked(None, live)
 
+    def switch_group(self, group_name):
+        """Hand a named group over to its next source. Returns the new live id.
+
+        The same operation the swap button performs, addressable by group name
+        so something outside the window -- a Stream Deck key -- can drive it
+        without knowing which source happens to be live.
+        """
+        members = [
+            sid for sid, source in self._sources.items()
+            if sources_module.group(source) == group_name
+        ]
+        if len(members) < 2:
+            return ""
+        live = next(
+            (sid for sid in members if not self._sources[sid].get("muted")),
+            None,
+        )
+        # With nothing live, take the first; otherwise hand to the next along.
+        target = members[0] if live is None else members[
+            (members.index(live) + 1) % len(members)]
+        self._on_switch_source_clicked(None, target)
+        return target
+
+    def source_groups(self):
+        """Group names with more than one member, i.e. worth switching."""
+        counts = {}
+        for source in self._sources.values():
+            name = sources_module.group(source)
+            if name:
+                counts[name] = counts.get(name, 0) + 1
+        return sorted(name for name, n in counts.items() if n > 1)
+
+    def set_source_volume(self, source_id, level):
+        """Set a source's trim from outside the window.
+
+        Routed through here rather than written to sources.json directly,
+        because Mixer holds the same dict and rewrites the file whole on every
+        save: an outside write would be discarded the next time a slider
+        moved. The row's own fader is updated with its signal blocked, so the
+        change lands once rather than bouncing back through the handler.
+        """
+        source = self._sources.get(source_id)
+        if source is None:
+            return False
+        level = max(0.0, min(1.0, float(level)))
+        cell = self.matrix.source(source_id)
+        if cell is not None:
+            cell.set_volume(level)
+        self.mixer.set_source_level(source_id, level,
+                                    source.get("muted", False))
+        sources_module.save(self._sources)
+        return True
+
+    def toggle_source_mute(self, source_id):
+        """Flip a source's mute. Returns the new state, or None if unknown.
+
+        Unmuting a grouped source takes the group with it, exactly as
+        unmuting the row in the window does: a group is one live microphone,
+        however the unmute arrived.
+        """
+        source = self._sources.get(source_id)
+        if source is None:
+            return None
+        muted = not source.get("muted", False)
+        source["muted"] = muted
+        cell = self.matrix.source(source_id)
+        if cell is not None:
+            cell.set_muted(muted)
+        self.mixer.set_source_level(source_id, source.get("level", 1.0), muted)
+        if not muted:
+            self._enforce_exclusive_group(source_id)
+        sources_module.save(self._sources)
+        return muted
+
+    def remote_snapshot(self):
+        """Everything a remote control needs to draw a button, as JSON."""
+        return json.dumps({
+            "sources": [
+                {
+                    "id": sid,
+                    "name": source.get("name", sid),
+                    "level": float(source.get("level", 1.0)),
+                    "muted": bool(source.get("muted", False)),
+                    "group": sources_module.group(source),
+                    "kind": sources_module.kind(source),
+                }
+                for sid, source in self._sources.items()
+            ],
+            "groups": self.source_groups(),
+        })
+
     def _on_switch_source_clicked(self, _matrix, source_id):
         """Hand the group over, in one press.
 
@@ -1396,6 +1487,101 @@ class WaveXLRApp(Adw.Application):
             "hide", 0, GLib.OptionFlags.NONE, GLib.OptionArg.NONE,
             "Start hidden in system tray", None,
         )
+        self._register_remote_actions()
+
+    def _register_remote_actions(self):
+        """Expose a few operations on the session bus.
+
+        GApplication already exports org.gtk.Actions on com.github.openwave;
+        it simply had nothing registered. Adding actions here makes them
+        callable from outside with no IPC of our own -- which is what lets a
+        Stream Deck drive the parts of OpenWave that PipeWire cannot reach,
+        because the GUI owns the mixer state and the USB device.
+
+        Handlers run on the GTK thread, like every other UI callback, so they
+        touch the same state by the same rules.
+        """
+        switch = Gio.SimpleAction.new("switch-group", GLib.VariantType.new("s"))
+        switch.connect("activate", self._action_switch_group)
+        self.add_action(switch)
+
+        groups = Gio.SimpleAction.new_stateful(
+            "source-groups", None, GLib.Variant("as", []),
+        )
+        groups.connect("activate", self._action_refresh_groups)
+        self.add_action(groups)
+
+        level = Gio.SimpleAction.new(
+            "set-source-level", GLib.VariantType.new("(sd)"),
+        )
+        level.connect("activate", self._action_set_source_level)
+        self.add_action(level)
+
+        mute = Gio.SimpleAction.new(
+            "toggle-source-mute", GLib.VariantType.new("s"),
+        )
+        mute.connect("activate", self._action_toggle_source_mute)
+        self.add_action(mute)
+
+        snapshot = Gio.SimpleAction.new_stateful(
+            "snapshot", None, GLib.Variant("s", "{}"),
+        )
+        snapshot.connect("activate", self._action_refresh_snapshot)
+        self.add_action(snapshot)
+
+    def _action_switch_group(self, _action, parameter):
+        if self._window is None or parameter is None:
+            return
+        try:
+            self._window.switch_group(parameter.get_string())
+        except Exception:                                   # noqa: BLE001
+            logging.exception("switch-group failed")
+
+    def _action_refresh_groups(self, action, _parameter):
+        """Publish the switchable group names as this action's state.
+
+        State rather than a return value: org.gtk.Actions has no reply for
+        Activate, but it does expose state and emits Changed when it moves, so
+        a reader can both poll and subscribe.
+        """
+        if self._window is None:
+            return
+        try:
+            action.set_state(GLib.Variant("as", self._window.source_groups()))
+        except Exception:                                   # noqa: BLE001
+            logging.exception("source-groups failed")
+
+    def _action_set_source_level(self, _action, parameter):
+        if self._window is None or parameter is None:
+            return
+        source_id, level = parameter.unpack()
+        try:
+            self._window.set_source_volume(source_id, level)
+        except Exception:                                   # noqa: BLE001
+            logging.exception("set-source-level failed")
+
+    def _action_toggle_source_mute(self, _action, parameter):
+        if self._window is None or parameter is None:
+            return
+        try:
+            self._window.toggle_source_mute(parameter.get_string())
+        except Exception:                                   # noqa: BLE001
+            logging.exception("toggle-source-mute failed")
+
+    def _action_refresh_snapshot(self, action, _parameter):
+        """Publish every source's name, level, mute and group as JSON.
+
+        One action rather than one per field: a remote control needs the whole
+        picture to draw a button -- which microphone is live, how loud a source
+        is, whether it is muted -- and reading it as five separate states
+        would let them disagree with each other mid-read.
+        """
+        if self._window is None:
+            return
+        try:
+            action.set_state(GLib.Variant("s", self._window.remote_snapshot()))
+        except Exception:                                   # noqa: BLE001
+            logging.exception("snapshot failed")
 
     def do_command_line(self, command_line):
         options = command_line.get_options_dict()
