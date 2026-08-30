@@ -925,6 +925,14 @@ class Mixer:
         if added or removed:
             self._enqueue(("poll",), self._reconcile_all)
         return added, removed
+    def live_captures(self):
+        """node.name set of the capture devices PipeWire currently has.
+
+        Rebound rather than mutated by the worker, so a read from the GTK
+        thread always sees one whole snapshot rather than a set mid-update.
+        """
+        return self._live_captures
+
     def _refresh_live_captures(self):
         """Re-snapshot present capture devices. Returns (added, removed) names.
 

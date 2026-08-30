@@ -10,6 +10,7 @@ import logging
 import os
 import sys
 import threading
+import time
 
 from .device import WaveDevice
 from .meter import MeterMonitor
@@ -21,7 +22,8 @@ from .mixdialog import MixDialog
 from .mixmatrix import MixMatrix
 from .sourcedialog import AddSourceDialog
 from . import (paths, setup, service, sources as sources_module,
-               mixes as mixes_module, desktop as desktop_module)
+               mixes as mixes_module, desktop as desktop_module,
+               recovery as recovery_module)
 
 logging.basicConfig(level=logging.INFO, format="%(name)s: %(message)s")
 
@@ -103,6 +105,7 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         # unseeded snapshot draws rows live rather than dead in the meantime.
         self._refresh_outputs()
         self.meter = MeterMonitor()
+        self._stall_watch = recovery_module.StallWatch()
         self._meter_targets = {}
         self._wire_matrix_cells()
         self._autodiscover_elgato_inputs()
@@ -952,9 +955,40 @@ class WaveXLRWindow(Adw.ApplicationWindow):
             if sources_module.kind(source) == sources_module.KIND_DEVICE:
                 if check_devices:
                     self._refresh_device_meter(source_id, source)
+                self._check_capture_stall(source_id, source)
             else:
                 self._refresh_app_meter(source_id)
         return True
+
+    def _check_capture_stall(self, source_id, source):
+        """Reopen a capture device that enumerated but never started.
+
+        A Wave replugged while running comes back reporting itself healthy at
+        every layer and delivers no frames at all. Nothing else notices,
+        because nothing else is looking for the difference between silence
+        and no data.
+        """
+        node_name = source.get("node_name")
+        present = node_name in self.mixer.live_captures()
+        if not present:
+            self._stall_watch.forget(node_name)
+            return
+        silent_for = self.meter.silent_for(source_id)
+        now = time.monotonic()
+        if not self._stall_watch.should_recover(
+                node_name, present, silent_for, now):
+            return
+        card = recovery_module.card_name_for(node_name)
+        if card is None:
+            return
+        self._stall_watch.record_attempt(node_name, now)
+        logging.warning(
+            "%s has produced no audio for %.0fs; reopening %s",
+            source.get("name", source_id), silent_for, card)
+        if recovery_module.cycle_card(card):
+            # The node is destroyed and recreated by the cycle, so the meter
+            # is pointing at something that no longer exists.
+            self._refresh_device_meter(source_id, source)
 
     def _start_meters(self):
         """Meter every source that has something to meter."""

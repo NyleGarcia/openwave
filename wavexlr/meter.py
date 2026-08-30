@@ -12,6 +12,7 @@ import os
 import struct
 import subprocess
 import threading
+import time
 
 import gi
 
@@ -30,6 +31,11 @@ class MeterMonitor:
         self._threads = {}      # source_id -> Thread
         self._stop_flags = {}   # source_id -> threading.Event
         self._cbs = {}          # source_id -> callable(float)
+        # When each meter last received *any* bytes. A stalled capture device
+        # delivers nothing rather than delivering zeros, so this distinguishes
+        # "dead" from "quiet" -- which a peak level cannot, since a muted
+        # microphone in a quiet room is legitimately near zero.
+        self._last_data = {}    # source_id -> monotonic seconds
 
     def start(self, source_id, source_node_name, callback):
         """Begin streaming peak values for `source_id`. Replaces any existing
@@ -72,6 +78,10 @@ class MeterMonitor:
         self._threads[source_id] = thread
         self._stop_flags[source_id] = stop_flag
         self._cbs[source_id] = callback
+        # Seeded at start, not left unset: a meter that has never received a
+        # byte is exactly the stall being looked for, and would otherwise
+        # look like a meter that simply has no history yet.
+        self._last_data[source_id] = time.monotonic()
         thread.start()
 
     def stop(self, source_id):
@@ -81,6 +91,7 @@ class MeterMonitor:
         proc = self._procs.pop(source_id, None)
         self._threads.pop(source_id, None)
         self._cbs.pop(source_id, None)
+        self._last_data.pop(source_id, None)
         if proc is None:
             return
         try:
@@ -107,6 +118,7 @@ class MeterMonitor:
                 data = proc.stdout.read(self.CHUNK_BYTES)
                 if not data or len(data) < 2:
                     break
+                self._last_data[source_id] = time.monotonic()
                 n = len(data) // 2
                 samples = struct.unpack(f"<{n}h", data[: n * 2])
                 peak = max(abs(s) for s in samples) / 32768.0
@@ -116,6 +128,25 @@ class MeterMonitor:
         # Final zero so the UI doesn't get stuck on the last value when the
         # subprocess dies (mic unplugged, app closed, etc.)
         GLib.idle_add(self._dispatch, source_id, 0.0)
+
+    def silent_for(self, source_id):
+        """Seconds since this meter last received any data, or None.
+
+        None means nothing is being measured, which is deliberately NOT the
+        same as measuring nothing. Two cases return it, and conflating either
+        with a stalled device would have something act on the silence:
+
+        - no meter is running for that source at all;
+        - the meter's own subprocess has died, so its silence says something
+          about pw-cat and nothing whatsoever about the hardware.
+        """
+        last = self._last_data.get(source_id)
+        if last is None:
+            return None
+        proc = self._procs.get(source_id)
+        if proc is None or proc.poll() is not None:
+            return None
+        return time.monotonic() - last
 
     def _dispatch(self, source_id, peak):
         cb = self._cbs.get(source_id)

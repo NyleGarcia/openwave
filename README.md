@@ -55,7 +55,12 @@ all, so on that hardware the app is the only way to switch it.
 - **Headphone controls** — Volume (syncs with hardware knob), low impedance mode
 - **Hardware sync** — 10 Hz polling keeps the app in sync with physical controls
 - **System integration** — Mute and HP volume sync bidirectionally with PipeWire/ALSA
-- **Audio capture fix** — Background daemon (systemd or runit) prevents the firmware race condition where mic goes silent
+- **Audio capture fix** — a background daemon (systemd or runit) prevents the
+  firmware race where the microphone goes silent, and OpenWave itself
+  **reopens a capture device that has stalled**: replugged while the system is
+  running, a Wave comes back reporting itself unmuted at full gain with
+  phantom on, and delivers no audio frames at all. Every layer says it is
+  healthy, so nothing notices. See [Stalled capture](#stalled-capture).
 - **System tray** — Runs in background with tray icon, mute from tray menu
 - **First-run setup** — Configures udev permissions and audio service automatically
 
@@ -64,6 +69,34 @@ all, so on that hardware the app is the only way to switch it.
 Wave devices use USB Class control transfers on endpoint 0 for device configuration. On Linux, `snd-usb-audio` normally blocks these transfers because `wIndex=0x3300` routes through interface 0 (owned by the audio driver). OpenWave uses `wIndex=0x3303` instead — the firmware only checks the `0x33` prefix, while the kernel sees interface 3 (unclaimed) and lets the transfer through. No driver detach needed, audio is never interrupted.
 
 Both devices speak the same vendor protocol (`bRequest` 0x85 read / 0x05 write) but with different config layouts: the Wave XLR uses a 34-byte block (gain uint16 @0, mute @4, HP volume int16 Q8.8 @9, knob mode @14, low-Z @33), the Wave:3 a 16-byte block (gain uint16 Q8.8 dB @0, mute @4, HP volume int16 Q8.8 @7, monitor mix uint16 Q8.8 percent @10, dial mode @12 — 1=gain, 2=headphones, 3=mix). Per-model constants live in `wavexlr/profiles.py`; `python3 -m wavexlr.probe` (`dump` / `watch` / `poke`) verifies a device against its profile and helps map new fields. The device services vendor transfers from only one process at a time, so quit OpenWave before probing.
+
+## Stalled capture
+
+A Wave replugged while the system is running enumerates, gets its ALSA card
+and its PipeWire node, reports itself unmuted at full gain with phantom power
+on — and produces nothing. Not quiet audio: no frames.
+
+The distinction that makes it detectable is **silence versus no data**. A live
+analogue input always delivers a noise floor; a stalled one delivers nothing,
+so a meter reading it blocks forever on its first read. That is the signal
+OpenWave watches, and it is why a level threshold would be the wrong test — a
+muted microphone in a quiet room is legitimately near zero and must not be
+"recovered".
+
+The remedy is to make ALSA close and reopen the device, which cycling the
+card's profile through `off` and back does. Restarting the capture keepalive
+does not: it exists to *prevent* the race and cannot clear one that has
+already happened.
+
+Three things it deliberately will not do. It will not act on a device that is
+simply absent — unplugged is not broken, and cycling a card for a device
+someone has just removed fights the person who removed it. It will not act on
+silence reported by a dead meter subprocess, whose silence says something
+about `pw-cat` and nothing about the hardware. And it gives up after two
+attempts, because cycling a card is disruptive and a device that is genuinely
+broken should be left alone to be noticed rather than reopened every minute
+forever. Unplugging resets that budget, since replugging is how the stall
+arises in the first place.
 
 ## Remote control
 
