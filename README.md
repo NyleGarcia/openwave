@@ -32,6 +32,11 @@ all, so on that hardware the app is the only way to switch it.
   fader can cover every game or two music players), or a hardware capture
   device such as a headset microphone. One row may be the catch-all for
   anything unmatched.
+- **Levels survive a reboot** — a mix master is a plain PipeWire sink volume,
+  and the mix sinks are `context.objects` in PipeWire's own configuration, so
+  the daemon recreates them at unity on every start and WirePlumber does not
+  restore them: they are neither streams nor devices it manages. OpenWave
+  remembers them itself and puts them back.
 - **Per-mix output** — every mix chooses its own output device, or none at all
   for a mix that exists only to be captured. A mix keeps playing when the
   window is closed.
@@ -69,6 +74,27 @@ all, so on that hardware the app is the only way to switch it.
 Wave devices use USB Class control transfers on endpoint 0 for device configuration. On Linux, `snd-usb-audio` normally blocks these transfers because `wIndex=0x3300` routes through interface 0 (owned by the audio driver). OpenWave uses `wIndex=0x3303` instead — the firmware only checks the `0x33` prefix, while the kernel sees interface 3 (unclaimed) and lets the transfer through. No driver detach needed, audio is never interrupted.
 
 Both devices speak the same vendor protocol (`bRequest` 0x85 read / 0x05 write) but with different config layouts: the Wave XLR uses a 34-byte block (gain uint16 @0, mute @4, HP volume int16 Q8.8 @9, knob mode @14, low-Z @33), the Wave:3 a 16-byte block (gain uint16 Q8.8 dB @0, mute @4, HP volume int16 Q8.8 @7, monitor mix uint16 Q8.8 percent @10, dial mode @12 — 1=gain, 2=headphones, 3=mix). Per-model constants live in `wavexlr/profiles.py`; `python3 -m wavexlr.probe` (`dump` / `watch` / `poke`) verifies a device against its profile and helps map new fields. The device services vendor transfers from only one process at a time, so quit OpenWave before probing.
+
+## Mix levels and reboots
+
+A mix master is a plain PipeWire sink volume, and the mix sinks are
+`context.objects` in PipeWire's configuration — recreated by the daemon on
+every start, at unity, with no memory. WirePlumber does not restore them
+either, because they are neither streams nor devices it manages. Left alone,
+every mix master silently resets to 100% at each boot, including anything set
+from a control surface.
+
+OpenWave remembers them in `mixes.json` under `volumes` and applies them once
+the sinks exist. It records what the master is actually set to rather than
+only what its own window did, because anything may move it — a Stream Deck,
+`pavucontrol`, a media key — and whoever moved it, that is the value that
+should come back.
+
+Observation is gated on the restore having happened, and that gate is the
+point rather than an optimisation. At boot the sinks exist at unity before
+OpenWave does; an observation landing first would persist that unity and
+destroy the value it exists to protect — silently, exactly once per boot,
+which is indistinguishable from never having saved anything.
 
 ## Stalled capture
 

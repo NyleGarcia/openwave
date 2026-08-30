@@ -946,6 +946,7 @@ class WaveXLRWindow(Adw.ApplicationWindow):
 
     def _stream_poll_tick(self):
         self.mixer.poll_streams()
+        self.mixer.observe_mix_volumes()
         self._device_poll_countdown -= 1
         check_devices = self._device_poll_countdown <= 0
         if check_devices:

@@ -69,6 +69,55 @@ def source_sink_name(source_id):
     return f"{SOURCE_SINK_PREFIX}{source_id}"
 
 
+def _pactl_sink_volumes():
+    """{sink_name: (volume 0-1, muted)} for every sink, in one call.
+
+    JSON rather than parsing `pactl list sinks`, whose labels are localised:
+    a German desktop reports "Stumm: nein" and a text scraper silently reads
+    every sink as unmuted.
+    """
+    try:
+        result = subprocess.run(
+            ["pactl", "--format=json", "list", "sinks"],
+            capture_output=True, text=True, timeout=5,
+        )
+    except (FileNotFoundError, subprocess.SubprocessError):
+        return {}
+    if result.returncode != 0:
+        return {}
+    try:
+        sinks = json.loads(result.stdout)
+    except (ValueError, TypeError):
+        return {}
+    out = {}
+    for sink in sinks if isinstance(sinks, list) else ():
+        if not isinstance(sink, dict):
+            continue
+        name = sink.get("name")
+        channels = (sink.get("volume") or {}).values()
+        levels = [c.get("value", 0) / 65536.0 for c in channels
+                  if isinstance(c, dict)]
+        if name and levels:
+            out[name] = (max(levels), bool(sink.get("mute")))
+    return out
+
+
+def _pactl_set_sink_volume(sink_name, volume):
+    _run_quiet(["pactl", "set-sink-volume", sink_name,
+                f"{round(max(0.0, min(1.0, volume)) * 100)}%"])
+
+
+def _pactl_set_sink_mute(sink_name, muted):
+    _run_quiet(["pactl", "set-sink-mute", sink_name, "1" if muted else "0"])
+
+
+def _run_quiet(argv):
+    try:
+        subprocess.run(argv, capture_output=True, text=True, timeout=3)
+    except (FileNotFoundError, subprocess.SubprocessError):
+        pass
+
+
 def _move_stream(serial, sink_name):
     """Move a stream onto a sink. `serial` is PulseAudio's index for it."""
     try:
@@ -96,6 +145,7 @@ CONFIG_PATH = os.path.expanduser("~/.config/openwave/mixes.json")
 # keys are always "<source>.<mix>", so a bare word cannot collide with one.
 # Per-mix output devices live under a nested reserved key. Cell keys are
 # always "<source>.<mix>", so a dot-free word cannot collide with one.
+VOLUMES_STATE_KEY = "volumes"
 OUTPUTS_STATE_KEY = "outputs"
 # Superseded scalar holding the Personal Mix's output. Still written for one
 # release so an older build reading this file keeps working.
@@ -521,6 +571,7 @@ class Mixer:
         # route cells into sinks it has not yet created or swept, so
         # set_sources/set_mixes stay silent until it has run once.
         self._started = False
+        self._volumes_restored = False
         self.mic, self.hp = find_wave_xlr_alsa()
 
         # Background worker: every operation that talks to pw-loopback /
@@ -610,7 +661,11 @@ class Mixer:
         )
 
     def cells(self):
-        """Per-cell state only; reserved scalar keys are not cells."""
+        """Per-cell state only; reserved scalar keys are not cells.
+
+        Cell keys are "<source>.<mix>", and every reserved key -- outputs,
+        output, volumes -- is a bare word, so the dot is the whole test.
+        """
         return {k: v for k, v in self._state.items() if "." in k}
 
     def _default_output_for(self, mix_id):
@@ -925,6 +980,91 @@ class Mixer:
         if added or removed:
             self._enqueue(("poll",), self._reconcile_all)
         return added, removed
+    # ------------------------------------------------------------ volumes
+    def _volumes(self):
+        volumes = self._state.get(VOLUMES_STATE_KEY)
+        if not isinstance(volumes, dict):
+            volumes = {}
+            self._state[VOLUMES_STATE_KEY] = volumes
+        return volumes
+
+    def mix_volume(self, mix_id):
+        """The remembered (volume, muted) for a mix, or None if unseen."""
+        with self._lock:
+            entry = self._volumes().get(mix_id)
+        if not isinstance(entry, dict):
+            return None
+        try:
+            return max(0.0, min(1.0, float(entry["volume"]))), \
+                bool(entry.get("muted", False))
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    def remember_mix_volume(self, mix_id, volume, muted):
+        """Record what a mix's master is set to. Returns True if it changed."""
+        volume = max(0.0, min(1.0, float(volume)))
+        with self._lock:
+            volumes = self._volumes()
+            entry = volumes.get(mix_id)
+            if isinstance(entry, dict) \
+                    and abs(entry.get("volume", -1) - volume) < 0.005 \
+                    and bool(entry.get("muted")) == bool(muted):
+                return False
+            volumes[mix_id] = {"volume": volume, "muted": bool(muted)}
+            self._save_state()
+        return True
+
+    def restore_mix_volumes(self):
+        """Put the mix masters back to what they were. Returns True if done.
+
+        The mix sinks are context.objects in PipeWire's own configuration, so
+        the daemon recreates them from scratch on every start and they come
+        up at unity with no memory of anything. WirePlumber does not restore
+        them either -- they are not streams and not devices it manages -- so
+        without this every mix master silently resets to 100% at each boot,
+        including any set from a control surface.
+        """
+        if not self._mixes:
+            # Nothing to restore onto yet. Crucially this leaves the gate
+            # shut, so no observation can run and persist the unity the
+            # daemon just created the sinks at.
+            return False
+        for mix_id, mix in list(self._mixes.items()):
+            sink = mix.get("sink")
+            remembered = self.mix_volume(mix_id)
+            if not sink or remembered is None:
+                continue
+            volume, muted = remembered
+            _pactl_set_sink_volume(sink, volume)
+            _pactl_set_sink_mute(sink, muted)
+        self._volumes_restored = True
+        return True
+
+    def observe_mix_volumes(self):
+        """Persist what the mix masters are actually set to right now.
+
+        Polled rather than hooked, because the master is a plain PipeWire
+        sink volume and anything may move it -- this window, a Stream Deck,
+        pavucontrol, a media key. Whoever moved it, the value is what should
+        come back after a reboot.
+
+        Gated on the restore having happened, and that gate is the whole
+        point. At boot the sinks are created at unity before OpenWave is
+        running; an observation that landed first would persist that unity
+        and destroy the very value it exists to protect -- silently, and
+        exactly once per boot, which is indistinguishable from not saving at
+        all.
+        """
+        if not self._volumes_restored:
+            return
+        live = _pactl_sink_volumes()
+        if not live:
+            return
+        for mix_id, mix in list(self._mixes.items()):
+            entry = live.get(mix.get("sink"))
+            if entry is not None:
+                self.remember_mix_volume(mix_id, entry[0], entry[1])
+
     def live_captures(self):
         """node.name set of the capture devices PipeWire currently has.
 
@@ -1010,6 +1150,10 @@ class Mixer:
         self._refresh_live_captures()
         self._started = True
         self._reconcile_all()
+        # After the sinks exist and before anything observes them: restoring
+        # first means the first observation sees the restored value rather
+        # than persisting the unity the daemon just created them at.
+        self.restore_mix_volumes()
 
     def _pin_unity(self, node_name):
         """Force a plumbing node to unity gain, unmuted.

@@ -55,6 +55,7 @@ def bare_mixer(**attrs):
     mx.mic = None
     mx.hp = None
     mx._started = False
+    mx._volumes_restored = True
     # set_cell and friends enqueue their reconcile even with no worker
     # running. The queue is the seam: work lands in _pending and stays there,
     # so a test can call the real entry points and inspect the state they
