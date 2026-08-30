@@ -218,6 +218,13 @@ string. One action rather than one per field: a remote control draws all of it
 on a single button, and five separate reads could catch the state mid-change
 and disagree with each other.
 
-Sends and trims are deliberately absent from that surface. They are re-applied
-on every reconcile, so a value set from outside would revert within a second —
-an action that silently undoes itself is worse than one that is not offered.
+Sends and trims are on that surface, but only because they go through the
+window. They are re-applied on every reconcile from the source record and the
+cell state, so a value poked into either config file from outside reverts
+within a second. That is the whole reason there is a bus action for them
+rather than a documented file format.
+
+Device gain is the exception that stays closed: the firmware serves vendor
+transfers to one process at a time, and while the GUI is open it holds the
+handle. No action can be offered that would work only when the window is
+shut.

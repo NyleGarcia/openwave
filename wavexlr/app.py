@@ -1278,6 +1278,38 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         sources_module.save(self._sources)
         return muted
 
+    def set_cell_volume(self, source_id, mix_id, volume):
+        """Set how much of one source a single mix receives.
+
+        The matrix cell, not the row trim: a send. Routed through the window
+        for the same reason everything else is -- the mixer re-applies
+        send x trim on every reconcile, so a value written anywhere else is
+        undone within a second.
+        """
+        if source_id not in self._sources or mix_id not in self._mixes:
+            return False
+        volume = max(0.0, min(1.0, float(volume)))
+        current = self.mixer.get_cell(source_id, mix_id)
+        cell = self.matrix.cell(source_id, mix_id)
+        if cell is not None:
+            cell.set_volume(volume)
+        self.mixer.set_cell(source_id, mix_id, volume, current["muted"])
+        self._refresh_mix_emptiness()
+        return True
+
+    def toggle_cell_mute(self, source_id, mix_id):
+        """Flip one cell's mute. Returns the new state, or None if unknown."""
+        if source_id not in self._sources or mix_id not in self._mixes:
+            return None
+        current = self.mixer.get_cell(source_id, mix_id)
+        muted = not current["muted"]
+        cell = self.matrix.cell(source_id, mix_id)
+        if cell is not None:
+            cell.set_muted(muted)
+        self.mixer.set_cell(source_id, mix_id, current["volume"], muted)
+        self._refresh_mix_emptiness()
+        return muted
+
     def remote_snapshot(self):
         """Everything a remote control needs to draw a button, as JSON."""
         return json.dumps({
@@ -1292,6 +1324,24 @@ class WaveXLRWindow(Adw.ApplicationWindow):
                 }
                 for sid, source in self._sources.items()
             ],
+            "mixes": [
+                {"id": mix_id, "name": mix.get("name", mix_id),
+                 "sink": mix.get("sink", "")}
+                for mix_id, mix in self._mixes.items()
+            ],
+            # Every cell, not only the ones that are up. A remote control
+            # needs to draw a send that is currently at zero as readily as one
+            # that is not, and cannot tell the difference between "zero" and
+            # "absent" if the zeroes are left out.
+            "cells": {
+                f"{source_id}.{mix_id}": {
+                    "volume": float(cell["volume"]),
+                    "muted": bool(cell["muted"]),
+                }
+                for source_id in self._sources
+                for mix_id in self._mixes
+                for cell in (self.mixer.get_cell(source_id, mix_id),)
+            },
             "groups": self.source_groups(),
         })
 
@@ -1523,6 +1573,18 @@ class WaveXLRApp(Adw.Application):
         mute.connect("activate", self._action_toggle_source_mute)
         self.add_action(mute)
 
+        cell = Gio.SimpleAction.new(
+            "set-cell-level", GLib.VariantType.new("(ssd)"),
+        )
+        cell.connect("activate", self._action_set_cell_level)
+        self.add_action(cell)
+
+        cell_mute = Gio.SimpleAction.new(
+            "toggle-cell-mute", GLib.VariantType.new("(ss)"),
+        )
+        cell_mute.connect("activate", self._action_toggle_cell_mute)
+        self.add_action(cell_mute)
+
         snapshot = Gio.SimpleAction.new_stateful(
             "snapshot", None, GLib.Variant("s", "{}"),
         )
@@ -1567,6 +1629,24 @@ class WaveXLRApp(Adw.Application):
             self._window.toggle_source_mute(parameter.get_string())
         except Exception:                                   # noqa: BLE001
             logging.exception("toggle-source-mute failed")
+
+    def _action_set_cell_level(self, _action, parameter):
+        if self._window is None or parameter is None:
+            return
+        source_id, mix_id, volume = parameter.unpack()
+        try:
+            self._window.set_cell_volume(source_id, mix_id, volume)
+        except Exception:                                   # noqa: BLE001
+            logging.exception("set-cell-level failed")
+
+    def _action_toggle_cell_mute(self, _action, parameter):
+        if self._window is None or parameter is None:
+            return
+        source_id, mix_id = parameter.unpack()
+        try:
+            self._window.toggle_cell_mute(source_id, mix_id)
+        except Exception:                                   # noqa: BLE001
+            logging.exception("toggle-cell-mute failed")
 
     def _action_refresh_snapshot(self, action, _parameter):
         """Publish every source's name, level, mute and group as JSON.

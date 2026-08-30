@@ -79,7 +79,7 @@ There is no protocol of its own: `GApplication` already exports
 $ gdbus call --session --dest com.github.openwave \
     --object-path /com/github/openwave --method org.gtk.Actions.List
 (['switch-group', 'set-source-level', 'toggle-source-mute',
-  'source-groups', 'snapshot'],)
+  'set-cell-level', 'toggle-cell-mute', 'source-groups', 'snapshot'],)
 ```
 
 | Action | Parameter | Does |
@@ -87,8 +87,10 @@ $ gdbus call --session --dest com.github.openwave \
 | `switch-group` | `s` group name | Hands a microphone group to its next member |
 | `set-source-level` | `(sd)` id, 0–1 | Sets a source's trim |
 | `toggle-source-mute` | `s` id | Flips a source's mute, group rules included |
+| `set-cell-level` | `(ssd)` source, mix, 0–1 | Sets one send — how much of a source a single mix receives |
+| `toggle-cell-mute` | `(ss)` source, mix | Flips one cell's mute |
 | `source-groups` | — | State: group names worth switching between |
-| `snapshot` | — | State: every source's name, level, mute, group and kind, as JSON |
+| `snapshot` | — | State: every source, mix and cell, as JSON |
 
 The two read-only actions publish their answer as action *state* rather than
 returning it: `Activate` has no reply, but `Describe` reads state and `Changed`
@@ -97,12 +99,15 @@ refresh, then describe.
 
 `snapshot` is one action rather than one per field because a remote control
 draws all of it on a single button, and reading it piecemeal would let the
-parts disagree mid-read.
+parts disagree mid-read. It reports **every** cell, including the ones at zero:
+a caller cannot otherwise tell a send that is down from one that does not
+exist.
 
 Everything goes through the window rather than the config files. `Mixer` holds
 the same dict the window holds and rewrites `sources.json` whole on every save,
 so a caller writing that file directly is overwritten the next time a fader
-moves.
+moves — and a cell written straight to `mixes.json` is undone even faster,
+because `send × trim` is re-applied on every reconcile.
 
 [**openwave-streamdeck**](https://github.com/NyleGarcia/openwave-streamdeck) is
 a Stream Deck plugin built on this.
