@@ -1,7 +1,10 @@
 [Desktop Entry]
+Type=Application
 Name=OpenWave
 Comment=The audio mixing matrix for Linux
 Exec=openwave
 Icon=openwave
-Type=Application
-Categories=Audio;Settings;
+Categories=AudioVideo;Audio;Mixer;
+Terminal=false
+StartupWMClass=com.github.openwave
+X-GNOME-UsesNotifications=true

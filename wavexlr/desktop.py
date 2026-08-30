@@ -12,8 +12,12 @@ import sys
 
 APP_ID = "openwave"
 NAME = "OpenWave"
-COMMENT = "Elgato Wave control for Linux"
-ICON = "audio-input-microphone"
+# Identity must match the packaged wavexlr.desktop: whichever entry the user
+# ends up with depends only on install path, so the two disagreeing means the
+# app renames itself depending on how it was installed.
+COMMENT = "The audio mixing matrix for Linux"
+ICON = "openwave"
+ICON_FALLBACK = "audio-input-microphone"
 # One main category only. AudioVideo plus Settings validates, but
 # desktop-file-validate warns it may list the app twice in the menu,
 # and a mixer belongs under Audio rather than under system settings.
@@ -55,6 +59,25 @@ def launch_command():
     return f"env PYTHONPATH={checkout} {sys.executable} -m wavexlr"
 
 
+def icon_name():
+    """The themed icon when it is installed, a stock one when it is not.
+
+    A run-in-place checkout has no openwave.svg in any icon directory, and a
+    .desktop entry naming an unresolvable icon renders as the generic broken
+    gear — worse than the stock microphone. The check mirrors where the
+    Makefile and the Nix wrapper put the icon: hicolor under each XDG data
+    dir.
+    """
+    data_dirs = [_data_home()] + (
+        os.environ.get("XDG_DATA_DIRS") or "/usr/local/share:/usr/share"
+    ).split(":")
+    for base in filter(None, data_dirs):
+        if os.path.isfile(os.path.join(
+                base, "icons", "hicolor", "scalable", "apps", f"{ICON}.svg")):
+            return ICON
+    return ICON_FALLBACK
+
+
 def _render(exec_command, autostart=False):
     lines = [
         "[Desktop Entry]",
@@ -62,7 +85,7 @@ def _render(exec_command, autostart=False):
         f"Name={NAME}",
         f"Comment={COMMENT}",
         f"Exec={exec_command}",
-        f"Icon={ICON}",
+        f"Icon={icon_name()}",
         f"Categories={CATEGORIES}",
         "Terminal=false",
         # Without this the tray icon and the window are two entries in the

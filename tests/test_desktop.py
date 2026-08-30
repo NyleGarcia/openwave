@@ -17,9 +17,13 @@ class TempHome(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self._env = {k: os.environ.get(k)
-                     for k in ("XDG_DATA_HOME", "XDG_CONFIG_HOME")}
+                     for k in ("XDG_DATA_HOME", "XDG_CONFIG_HOME",
+                               "XDG_DATA_DIRS")}
         os.environ["XDG_DATA_HOME"] = os.path.join(self._tmp.name, "data")
         os.environ["XDG_CONFIG_HOME"] = os.path.join(self._tmp.name, "config")
+        # Point system data dirs into the sandbox too, so a machine that has
+        # OpenWave's icons installed for real cannot leak into the tests.
+        os.environ["XDG_DATA_DIRS"] = os.path.join(self._tmp.name, "sysdata")
 
     def tearDown(self):
         for key, value in self._env.items():
@@ -144,6 +148,42 @@ class Autostart(TempHome):
                             desktop.autostart_path())
         desktop.set_autostart(False)
         self.assertTrue(os.path.isfile(desktop.menu_entry_path()))
+
+
+class Identity(TempHome):
+    """The generated entry and the packaged wavexlr.desktop must agree.
+
+    They drifted once: the generated one kept the pre-rename tagline and a
+    generic icon, so the app introduced itself differently depending on how
+    it was installed.
+    """
+
+    def _packaged(self):
+        path = os.path.join(os.path.dirname(desktop.__file__),
+                            "..", "wavexlr.desktop")
+        entries = {}
+        for line in open(path):
+            if "=" in line:
+                key, value = line.strip().split("=", 1)
+                entries[key] = value
+        return entries
+
+    def test_name_comment_categories_match_the_packaged_entry(self):
+        desktop.ensure_menu_entry()
+        generated = open(desktop.menu_entry_path()).read()
+        packaged = self._packaged()
+        for key in ("Name", "Comment", "Categories", "StartupWMClass"):
+            self.assertIn(f"{key}={packaged[key]}", generated)
+
+    def test_icon_falls_back_when_the_themed_one_is_absent(self):
+        self.assertEqual(desktop.icon_name(), desktop.ICON_FALLBACK)
+
+    def test_icon_is_the_themed_one_when_installed(self):
+        icon = os.path.join(os.environ["XDG_DATA_DIRS"], "icons", "hicolor",
+                            "scalable", "apps", "openwave.svg")
+        os.makedirs(os.path.dirname(icon))
+        open(icon, "w").close()
+        self.assertEqual(desktop.icon_name(), desktop.ICON)
 
 
 if __name__ == "__main__":
