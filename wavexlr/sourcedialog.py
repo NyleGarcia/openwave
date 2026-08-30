@@ -319,7 +319,11 @@ class AddSourceDialog(Adw.Dialog):
             self._listbox.append(empty)
 
         for app_name in sorted(apps.keys()):
-            row = Adw.ActionRow(title=app_name)
+            # display_name is a label only; app_name below stays the match key,
+            # so a row bound by its friendly title still captures by exact
+            # application.name equality.
+            row = Adw.ActionRow(
+                title=apps[app_name][0].get("display_name") or app_name)
             sample = apps[app_name][0].get("media_name") or apps[app_name][0].get("node_name", "")
             if sample:
                 row.set_subtitle(sample)

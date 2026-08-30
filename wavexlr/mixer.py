@@ -393,6 +393,59 @@ def default_sink_name():
     return _default_sink_name()
 
 
+# ----- friendly display names ------------------------------------------------
+# app_name is the stable MATCH KEY and must never be enriched; display_name is
+# a LABEL for the Add Source picker. Ported from CryoByte33/openwave, which
+# split the two the same way.
+
+_GENERIC_PREFIXES = ("ALSA plug-in", "alsa-playback", "PulseAudio")
+# Engine/toolkit defaults that aren't the real app — Electron apps commonly
+# report "Chromium" even though the binary is the actual app (e.g. "Cider").
+_GENERIC_NAMES = {"chromium", "electron", "unknown"}
+# Binaries that are runtimes/launchers, not the app itself — their name tells
+# us nothing, so for these we fall through to the owning X11 window instead.
+# Doubles as a set of generic *names*: an app reporting
+# application.name="java" is just as unhelpful as the binary "java".
+_RUNTIME_BINARIES = {
+    "java", "electron", "chromium", "chromium-browser", "chrome",
+    "google-chrome", "wine", "wine64", "wine-preloader", "python", "python3",
+    "mono", "node", "nw", "sh", "bash",
+}
+
+
+def _is_generic(app_name, binary):
+    """True when application.name is an unhelpful toolkit/bridge/runtime label
+    rather than the real app — only these get enriched (binary, then X11
+    window).
+
+    An app whose name simply matches its binary (Zen/zen, Discord/discord) is
+    NOT generic: that is the normal, good case. Treating it as generic sent it
+    through the window lookup, where a Flatpak's namespaced PID could collide
+    with another sandbox's window and mislabel it (Zen showed as "Bolt
+    Launcher")."""
+    name = (app_name or "").strip().lower()
+    if not name or name in _GENERIC_NAMES or name in _RUNTIME_BINARIES:
+        return True
+    return any(name.startswith(p.lower()) for p in _GENERIC_PREFIXES)
+
+
+def _binary_name(binary, app_name):
+    """A friendly name from the process binary (e.g. "Cider" behind
+    "Chromium"), or None when the binary is a runtime ("java") or just echoes
+    app_name."""
+    b = (binary or "").strip().rsplit("/", 1)[-1]   # basename if it's a path
+    if not b or b.lower() in _RUNTIME_BINARIES             or b.lower() == (app_name or "").strip().lower():
+        return None
+    return b
+
+
+def _to_int(v):
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return None
+
+
 def list_audio_streams():
     """Return [{id, app_name, media_name, node_name}, ...] for active output streams."""
     import json as _json
@@ -435,7 +488,25 @@ def list_audio_streams():
             "media_name": props.get("media.name", ""),
             "node_name": node_name,
             "binary": props.get("application.process.binary", ""),
+            "_pid": _to_int(props.get("application.process.id")),
         })
+
+    # For generic names, prefer a meaningful binary ("Cider"), else the owning
+    # X11 window ("RuneLite"). X11 is looked up lazily, only when a generic
+    # stream has no usable binary, so the common path never touches Xlib.
+    pids = None
+    for stream in out:
+        pid = stream.pop("_pid")
+        if not _is_generic(stream["app_name"], stream["binary"]):
+            stream["display_name"] = stream["app_name"]
+            continue
+        name = _binary_name(stream["binary"], stream["app_name"])
+        if not name:
+            if pids is None:
+                from . import wmnames
+                pids = wmnames.pid_names()
+            name = pids.get(pid) if pid else None
+        stream["display_name"] = name or stream["app_name"]
     return out
 
 # ----- application matching -------------------------------------------------

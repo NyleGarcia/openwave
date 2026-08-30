@@ -200,6 +200,9 @@ sudo make -C /path/to/openwave uninstall PREFIX=/usr/local
 - GTK4, libadwaita
 - PipeWire (for audio capture fix)
 - libusb 1.0
+- python-xlib *(optional)* — friendlier app names in the Add Source picker
+  for X11/XWayland apps that report a generic PipeWire name ("ALSA plug-in
+  [java]"); without it those rows fall back to the raw name
 
 ## Usage
 
