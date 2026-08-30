@@ -23,7 +23,8 @@ from .mixmatrix import MixMatrix
 from .sourcedialog import AddSourceDialog
 from . import (paths, setup, service, sources as sources_module,
                mixes as mixes_module, desktop as desktop_module,
-               recovery as recovery_module, device as device_module)
+               recovery as recovery_module, device as device_module,
+               diag as diag_module, scenes as scenes_module)
 
 logging.basicConfig(level=logging.INFO, format="%(name)s: %(message)s")
 
@@ -60,7 +61,10 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         # scrolls rather than being clipped.
         self.set_size_request(820, 480)
         self._restore_window_size()
-        self.dev = WaveDevice()
+        self.dev = WaveDevice()   # the selected device; one of self._devs
+        self._devs = []           # every Wave held open, bus order
+        self._any_hw_muted = False
+        self._selector_updating = False
         self._gain_max = 0x5000
         self._updating_ui = False
         self._last_state = None
@@ -150,6 +154,12 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         if isinstance(width, int) and isinstance(height, int) \
                 and width >= 820 and height >= 480:
             self.set_default_size(width, height)
+        else:
+            # First run: without this the window opens at the 820x480
+            # MINIMUM, which clips the matrix on every axis. Sized to show
+            # the seeded rows and three mix columns with room to breathe,
+            # while still fitting a 1366x768 laptop panel.
+            self.set_default_size(1280, 720)
         if state.get("maximized"):
             self.maximize()
 
@@ -225,6 +235,20 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         self.service_btn.set_popover(service_pop)
         header.pack_start(self.service_btn)
 
+        # Scenes: named level snapshots, recalled as one gesture.
+        self.scene_btn = Gtk.MenuButton(
+            icon_name="camera-photo-symbolic", tooltip_text="Scenes",
+        )
+        self.scene_btn.add_css_class("flat")
+        header.pack_start(self.scene_btn)
+        # Window-scoped so it does not join the app's remote surface: the
+        # dialog is menu plumbing, and org.gtk.Actions exports every app
+        # action whether meant for the bus or not.
+        save_as = Gio.SimpleAction.new("save-scene-as", None)
+        save_as.connect("activate", lambda *_a: self.prompt_save_scene())
+        self.add_action(save_as)
+        self._rebuild_scene_menu()
+
         refresh_btn = Gtk.Button(icon_name="view-refresh-symbolic", tooltip_text="Reconnect")
         refresh_btn.connect("clicked", lambda _: self._try_connect())
         header.pack_end(refresh_btn)
@@ -286,7 +310,9 @@ class WaveXLRWindow(Adw.ApplicationWindow):
                 name=source.get("name", source_id),
                 icon_name=source.get("icon_name", "applications-multimedia-symbolic"),
                 has_level=True,
-                removable=not sources_module.is_protected(source),
+                removable=(not sources_module.is_protected(source)
+                           or sources_module.kind(source)
+                           == sources_module.KIND_DEVICE),
                 editable=True,
                 reorderable=True,
                 is_capture=sources_module.kind(source) == sources_module.KIND_DEVICE,
@@ -303,6 +329,7 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         self.matrix.connect("rename-mix-clicked", self._on_rename_mix_clicked)
         self.matrix.connect("remove-mix-clicked", self._on_remove_mix_clicked)
         self.matrix.connect("mix-output-changed", self._on_mix_output_changed)
+        self.matrix.connect("mix-volume-changed", self._on_mix_volume_changed)
 
         # --- Sidebar: device controls -----------------------------------------
         sidebar_scroll = Gtk.ScrolledWindow(
@@ -324,6 +351,18 @@ class WaveXLRWindow(Adw.ApplicationWindow):
 
     def _build_device_pane(self, parent):
         """Populate the sidebar: Microphone, Headphones, and device info."""
+        # --- Device selector ---
+        # Hidden with a single device: a dropdown with one entry is a
+        # question with no answer. With two or more, the controls below
+        # bind to whichever unit is chosen here; every unit keeps polling
+        # and syncing regardless.
+        self._selector_group = Adw.PreferencesGroup(visible=False)
+        parent.append(self._selector_group)
+        self.device_combo = Adw.ComboRow(title="Device")
+        self.device_combo.connect("notify::selected",
+                                  self._on_device_selected)
+        self._selector_group.add(self.device_combo)
+
         # --- Mic controls ---
         mic_group = Adw.PreferencesGroup(title="Microphone")
         parent.append(mic_group)
@@ -474,6 +513,22 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         self.serial_row.add_suffix(self.serial_label)
         info_expander.add_row(self.serial_row)
 
+        # --- Diagnostics ---
+        # In-app rather than CLI-only on purpose: the firmware serves vendor
+        # transfers to one process, and while the window is open that process
+        # is this one — the CLI cannot read the device the report is about.
+        diag_group = Adw.PreferencesGroup()
+        parent.append(diag_group)
+        diag_row = Adw.ActionRow(
+            title="Export diagnostics",
+            subtitle="One file to attach to a bug report",
+            activatable=True,
+        )
+        diag_row.add_suffix(Gtk.Image.new_from_icon_name(
+            "document-save-symbolic"))
+        diag_row.connect("activated", self._on_export_diagnostics)
+        diag_group.add(diag_row)
+
     def _on_autostart_toggled(self, row, _param):
         enabled, _hidden = desktop_module.set_autostart(
             row.get_active(), self.tray_row.get_active())
@@ -553,6 +608,47 @@ class WaveXLRWindow(Adw.ApplicationWindow):
             err.add_response("ok", "OK")
             err.choose(self, None, lambda d, r: d.choose_finish(r))
 
+    def _on_export_diagnostics(self, _row):
+        diag = diag_module
+
+        def _device_here():
+            """Every device section, through the handles this process holds."""
+            if not self._devs:
+                return "no device connected"
+            lines = []
+            for dev in self._devs:
+                lines.extend(diag.describe_device(dev))
+                lines.append("")
+            return "\n".join(lines).rstrip()
+
+        sections = tuple(
+            ("Device", _device_here) if title == "Device" else (title, fn)
+            for title, fn in diag.SECTIONS
+        )
+        self._usb_async(
+            lambda: diag.assemble(sections=sections),
+            on_done=self._save_diagnostics,
+        )
+
+    def _save_diagnostics(self, text):
+        dialog = Gtk.FileDialog(
+            initial_name=os.path.basename(diag_module.default_path()))
+
+        def _done(dlg, result):
+            try:
+                gfile = dlg.save_finish(result)
+            except GLib.Error:
+                return  # dismissed
+            try:
+                with open(gfile.get_path(), "w") as f:
+                    f.write(text)
+            except OSError as e:
+                err = Adw.AlertDialog(heading="Export Failed", body=str(e))
+                err.add_response("ok", "OK")
+                err.choose(self, None, lambda d, r: d.choose_finish(r))
+
+        dialog.save(self, None, _done)
+
     def _usb_async(self, fn, on_done=None, on_error=None):
         """Run fn in a background thread; call on_done/on_error on GTK thread."""
         def _worker():
@@ -566,31 +662,130 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         threading.Thread(target=_worker, daemon=True).start()
 
     def _try_connect(self):
+        # One connect at a time: the device watch, the poll-error path and
+        # the reconnect tick can all ask for one, and two workers reopening
+        # the same units concurrently would double-open and leak handles.
+        if getattr(self, "_connecting", False):
+            return
+        self._connecting = True
         self._window_title.set_subtitle("Connecting…")
         def _connect():
+            # Remember which unit was selected before everything reopens, so
+            # a rescan (a second device plugged in) does not yank the sidebar
+            # off the device the user was adjusting.
+            prev = (getattr(self.dev.profile, "key", None), self.dev.usbbus)
+            for d in self._devs:
+                d.disconnect()
             self.dev.disconnect()
-            self.dev.connect()
-            info = {}
+            devs = []
+            for profile, bus, addr in device_module.scan():
+                d = WaveDevice()
+                try:
+                    d.connect(profile, bus, addr)
+                except RuntimeError:
+                    continue
+                try:
+                    d.info = d.read_device_info()
+                except Exception:
+                    d.info = {}
+                devs.append(d)
             try:
-                info = self.dev.read_device_info()
+                if not devs:
+                    raise RuntimeError("No supported Elgato Wave device found")
+                selected = next(
+                    (d for d in devs
+                     if (d.profile.key, d.usbbus) == prev), devs[0])
+                return {"devs": devs, "selected": selected,
+                        "state": selected.get_all()}
             except Exception:
-                pass
-            return {"state": self.dev.get_all(), "info": info}
+                # A failure after handles opened (a device re-enumerating
+                # mid-connect, typically) must not strand them: an unclosed
+                # handle blocks every later open of that unit.
+                for d in devs:
+                    d.disconnect()
+                raise
         def _done(result):
+            self._connecting = False
+            self._devs = result["devs"]
+            self.dev = result["selected"]
             # A Wave that appeared after the mixer was built: mic/hp were
             # resolved to None then, and only a re-detect corrects them.
             self.mixer.redetect_device()
+            self._refresh_device_selector()
             self._apply_profile(self.dev.profile)
             self._apply_state(result["state"])
-            info = result["info"]
-            self.fw_label.set_label(info.get("fw_version", "—"))
-            self.api_label.set_label(info.get("api_version", "—"))
-            self.serial_label.set_label(info.get("serial", "—"))
+            self._apply_device_info()
             self._start_polling()
+            self._start_device_watch()
         def _fail(e):
+            self._connecting = False
+            self._devs = []
             self._window_title.set_subtitle("Disconnected")
+            self._refresh_device_selector()
             self._start_reconnect()
         self._usb_async(_connect, _done, _fail)
+
+    def _device_label(self, dev):
+        """How a unit is named in the selector: model, plus enough serial
+        to tell two of the same model apart."""
+        serial = (dev.info or {}).get("serial", "")
+        tail = serial[-4:] if serial else dev.usbbus or "?"
+        return f"{dev.profile.display_name} · {tail}"
+
+    def _refresh_device_selector(self):
+        self._selector_updating = True
+        try:
+            names = Gtk.StringList()
+            for d in self._devs:
+                names.append(self._device_label(d))
+            self.device_combo.set_model(names)
+            if self.dev in self._devs:
+                self.device_combo.set_selected(self._devs.index(self.dev))
+            self._selector_group.set_visible(len(self._devs) > 1)
+        finally:
+            self._selector_updating = False
+
+    def _on_device_selected(self, row, _param):
+        if self._selector_updating:
+            return
+        idx = row.get_selected()
+        if not (0 <= idx < len(self._devs)) or self._devs[idx] is self.dev:
+            return
+        self.dev = self._devs[idx]
+        self._last_state = None
+        self._apply_profile(self.dev.profile)
+        self._apply_device_info()
+        self._usb_async(self.dev.get_all, self._apply_state)
+        self._notify_tray()
+
+    def _apply_device_info(self):
+        info = self.dev.info or {}
+        self.fw_label.set_label(info.get("fw_version", "—"))
+        self.api_label.set_label(info.get("api_version", "—"))
+        self.serial_label.set_label(info.get("serial", "—"))
+
+    def _start_device_watch(self):
+        """Notice a Wave appearing or vanishing while others stay connected.
+
+        A 3 s sysfs diff against what is held open; any difference funnels
+        into _try_connect, which rescans everything and keeps the selection.
+        The disconnected case is _start_reconnect's; this one runs only
+        while at least one device is open, and stops itself when none is.
+        """
+        if getattr(self, "_device_watch_id", None):
+            return
+        self._device_watch_id = GLib.timeout_add_seconds(
+            3, self._device_watch_tick)
+
+    def _device_watch_tick(self):
+        if not self._devs:
+            self._device_watch_id = None
+            return False
+        held = {d.usbbus for d in self._devs}
+        present = {unit[2] for unit in device_module.present_units()}
+        if present != held:
+            self._try_connect()
+        return True
 
     def _start_reconnect(self):
         """Watch for a Wave appearing, so plugging one in needs no Refresh.
@@ -626,24 +821,131 @@ class WaveXLRWindow(Adw.ApplicationWindow):
             self._poll_id = None
 
     def _poll_tick(self):
-        """Called every 100ms — read device state in background."""
-        if not self.dev.connected:
+        """Called every 100ms — read every device's state in background.
+
+        Every unit is polled, not just the selected one: the ALSA sync and
+        the hardware mute button live inside get_all(), and a device whose
+        button goes dead the moment another is selected would read as
+        broken hardware.
+        """
+        if not self._devs:
             self._poll_id = None
             return False  # stop polling
-        # Only poll if not already busy with a user-initiated write
-        self._usb_async(self.dev.get_all, self._on_poll_result, self._on_poll_error)
+        # One poll in flight at a time. A transfer against a just-unplugged
+        # device blocks for its full 1 s timeout, and a 100 ms tick that
+        # spawns regardless stacked ten workers hammering the dying handle.
+        if getattr(self, "_poll_busy", False):
+            return True
+        self._poll_busy = True
+        def _poll_all():
+            gone, state, any_muted, hw_mutes = [], None, False, []
+            for d in list(self._devs):
+                try:
+                    s = d.get_all()
+                    if not d.info:
+                        # devinfo is best-effort at connect; rows pair with
+                        # handles by serial, so keep trying until it reads.
+                        try:
+                            d.info = d.read_device_info()
+                        except Exception:
+                            pass
+                except Exception:
+                    d.disconnect()
+                    gone.append(d)
+                    continue
+                muted = bool(s.get("mute"))
+                any_muted = any_muted or muted
+                # A CHANGE in a device's own mute — the physical button —
+                # is what drives its row; steady state drives nothing, so
+                # row and hardware can still be set apart deliberately.
+                prev = getattr(d, "_hw_mute_seen", None)
+                d._hw_mute_seen = muted
+                if prev is not None and prev != muted:
+                    hw_mutes.append((d, muted))
+                if d is self.dev:
+                    state = s
+            return {"gone": gone, "state": state, "any_muted": any_muted,
+                    "hw_mutes": hw_mutes}
+        self._usb_async(_poll_all, self._on_poll_result, self._on_poll_error)
         return True  # keep polling
 
-    def _on_poll_result(self, state):
-        if state != self._last_state:
+    def _source_for_device(self, dev):
+        """(source_id, source) of the row carrying this device, or (None, None)."""
+        serial = (dev.info or {}).get("serial", "")
+        stem = self._NODE_STEMS.get(dev.profile.key, "\0")
+        stem_hit = None
+        for sid, source in self._sources.items():
+            if sources_module.kind(source) != sources_module.KIND_DEVICE:
+                continue
+            node = source.get("node_name") or ""
+            if serial and serial in node:
+                return sid, source
+            if stem in node:
+                stem_hit = (sid, source) if stem_hit is None else (None, None)
+        return stem_hit or (None, None)
+
+    def _set_row_mute_from_hardware(self, dev, muted):
+        """The physical mute button reaches the matrix row, like the row
+        reaches the hardware. Deliberately NOT through _sync_hw_mute — the
+        hardware is already in the new state, and writing it back would
+        turn the pair into a loop."""
+        source_id, source = self._source_for_device(dev)
+        if source is None or bool(source.get("muted", False)) == muted:
+            return
+        source["muted"] = muted
+        self.mixer.set_source_level(source_id, source.get("level", 1.0), muted)
+        cell = self.matrix.source(source_id)
+        if cell is not None:
+            cell.set_muted(muted)
+        if not muted:
+            self._enforce_exclusive_group(source_id)
+        sources_module.save(self._sources)
+        self._notify_tray()
+
+    def _on_poll_result(self, result):
+        self._poll_busy = False
+        for dev, muted in result.get("hw_mutes", ()):
+            self._set_row_mute_from_hardware(dev, muted)
+        muted_changed = result["any_muted"] != self._any_hw_muted
+        self._any_hw_muted = result["any_muted"]
+        if result["gone"]:
+            self._devs = [d for d in self._devs if d not in result["gone"]]
+            if self.dev in result["gone"]:
+                self._select_surviving_device()
+                return
+            self._refresh_device_selector()
+        state = result["state"]
+        if state is not None and state != self._last_state:
             self._apply_state(state)
+        elif muted_changed:
+            self._notify_tray()
+
+    def _select_surviving_device(self):
+        """The selected unit vanished; fall back to another or to none."""
+        if self._devs:
+            self.dev = self._devs[0]
+            self._last_state = None
+            self._refresh_device_selector()
+            self._apply_profile(self.dev.profile)
+            self._apply_device_info()
+            self._usb_async(self.dev.get_all, self._apply_state)
+            self._notify_tray()
+        else:
+            self._window_title.set_subtitle("Disconnected")
+            self._stop_polling()
+            self._refresh_device_selector()
+            self._notify_tray()
+            self._start_reconnect()
 
     def _on_poll_error(self, e):
-        self._window_title.set_subtitle("Disconnected")
+        self._poll_busy = False
+        # _poll_all swallows per-device errors; reaching here means the
+        # poll machinery itself failed. Treat it as everything gone.
+        for d in self._devs:
+            d.disconnect()
+        self._devs = []
         self.dev.disconnect()
-        self._stop_polling()
-        self._notify_tray()
-        self._start_reconnect()
+        self._select_surviving_device()
 
     def _apply_profile(self, profile):
         """Adapt the UI to the connected device model."""
@@ -709,11 +1011,10 @@ class WaveXLRWindow(Adw.ApplicationWindow):
             app.refresh_tray()
 
     def _on_usb_error(self, e):
-        self._window_title.set_subtitle("Disconnected")
+        """A write to the selected device failed: drop that unit only."""
         self.dev.disconnect()
-        self._stop_polling()
-        self._notify_tray()
-        self._start_reconnect()
+        self._devs = [d for d in self._devs if d is not self.dev]
+        self._select_surviving_device()
 
     def _on_mute_changed(self, row, _pspec):
         if self._updating_ui or not self.dev.connected:
@@ -786,6 +1087,38 @@ class WaveXLRWindow(Adw.ApplicationWindow):
             self.matrix.set_mix_outputs(
                 mix_id, entries, current, summary, monitored,
             )
+
+    def _on_mix_volume_changed(self, _matrix, mix_id, value):
+        """A header's master slider moved: throttled like every live slider,
+        because a drag would otherwise spawn a wpctl per pixel."""
+        self._throttle.push(
+            f"mixvol:{mix_id}", value,
+            lambda v, mid=mix_id: self._usb_async(
+                lambda: self.mixer.set_mix_volume(mid, v)))
+
+    def _refresh_mix_meter(self, mix_id, mix):
+        """Point a meter at the mix's sink (its monitor carries the audio).
+
+        Re-pointed idempotently from the stream tick: installing mixes
+        destroys and recreates their sinks, which kills the pw-cat under
+        the meter — running() going false is how that is noticed.
+        """
+        key = f"mix:{mix_id}"
+        sink = mix.get("sink")
+        if not sink:
+            return
+        if self._meter_targets.get(key) == sink and self.meter.running(key):
+            return
+        self._meter_targets[key] = sink
+        self.meter.start(
+            key, sink,
+            lambda level, mid=mix_id: self.matrix.set_mix_level(mid, level),
+            capture_sink=True)
+
+    def _stop_mix_meter(self, mix_id):
+        key = f"mix:{mix_id}"
+        if self._meter_targets.pop(key, None) is not None:
+            self.meter.stop(key)
 
     def _on_mix_output_changed(self, _matrix, mix_id, name):
         self.mixer.set_output(mix_id, name)
@@ -912,6 +1245,7 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         # mixer, which captures the sink name before dropping the definition and
         # on its worker tears every loopback down before destroying the sink;
         # then the definition and the generated config catch up.
+        self._stop_mix_meter(mix_id)
         self.matrix.remove_mix(mix_id)
         self.mixer.remove_mix(mix_id)
         self._mixes = mixes_module.remove(self._mixes, mix_id)
@@ -1000,6 +1334,11 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         if check_devices:
             self._device_poll_countdown = self._DEVICE_POLL_EVERY
             self.mixer.request_capture_poll()
+            # Discovery is not a launch-time-only event: a Wave plugged in
+            # (or back in, after its row was removed while unplugged) should
+            # get its row now, not on the next restart. Idempotent — bound
+            # and already-offered nodes are skipped.
+            self._autodiscover_elgato_inputs()
         for source_id, source in list(self._sources.items()):
             if sources_module.kind(source) == sources_module.KIND_DEVICE:
                 if check_devices:
@@ -1007,6 +1346,13 @@ class WaveXLRWindow(Adw.ApplicationWindow):
                 self._check_capture_stall(source_id, source)
             else:
                 self._refresh_app_meter(source_id)
+        for mix_id, mix in list(self._mixes.items()):
+            self._refresh_mix_meter(mix_id, mix)
+            # observe_mix_volumes just ran, so this follows an external move
+            # (pavucontrol, a media key, a scene) within one tick.
+            remembered = self.mixer.mix_volume(mix_id)
+            if remembered is not None:
+                self.matrix.set_mix_volume(mix_id, remembered[0])
         return True
 
     def _check_capture_stall(self, source_id, source):
@@ -1070,6 +1416,13 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         cell = self.matrix.source(source_id)
         if cell is not None:
             cell.set_available(present, reason="Capture device not connected")
+            # Removability follows presence: a connected Elgato row stays
+            # protected, an unplugged one may be cleared away (it returns by
+            # autodiscovery if the device is plugged back in).
+            if sources_module.is_protected(source):
+                cell.set_removable(
+                    not present,
+                    tooltip="Remove row (device not connected)")
         if not present:
             # Stop rather than leave pw-cat holding a device that has gone, and
             # zero the bar so it does not freeze on its last value.
@@ -1206,7 +1559,9 @@ class WaveXLRWindow(Adw.ApplicationWindow):
             name=source["name"],
             icon_name=source["icon_name"],
             has_level=True,
-            removable=not sources_module.is_protected(source),
+            removable=(not sources_module.is_protected(source)
+                           or sources_module.kind(source)
+                           == sources_module.KIND_DEVICE),
             editable=True,
             reorderable=True,
             is_capture=sources_module.kind(source) == sources_module.KIND_DEVICE,
@@ -1302,6 +1657,10 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         cell = self.matrix.source(source_id)
         if cell is None:
             return
+        # Protected device rows carry a remove button that starts hidden;
+        # the presence tick shows it only while the device is unplugged.
+        if sources_module.is_protected(self._sources.get(source_id, {})):
+            cell.set_removable(False)
         source = self._sources.get(source_id, {})
         cell.set_volume(float(source.get("level", 1.0)))
         cell.set_muted(bool(source.get("muted", False)))
@@ -1317,6 +1676,7 @@ class WaveXLRWindow(Adw.ApplicationWindow):
     def _on_source_mute_toggled(self, _cell, muted, source_id):
         self.mixer.set_source_level(
             source_id, self._sources.get(source_id, {}).get("level", 1.0), muted)
+        self._sync_hw_mute(self._sources.get(source_id, {}), muted)
         if not muted:
             self._enforce_exclusive_group(source_id)
         sources_module.save(self._sources)
@@ -1396,6 +1756,67 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         sources_module.save(self._sources)
         return True
 
+    # How each protocol profile's hardware names its capture node. Used to
+    # pair a row with a handle when the devinfo serial is unavailable.
+    _NODE_STEMS = {
+        "wave_xlr": "Elgato_Wave_XLR_",
+        "wave_xlr_mk2": "Elgato_XLR_Dock_",
+        "wave3": "Elgato_Wave_3",
+    }
+
+    def _device_for_source(self, source):
+        """The open WaveDevice behind an Elgato capture row, or None.
+
+        Matched by serial first: the ALSA node name embeds it
+        ("...Elgato_XLR_Dock_<serial>-00..."), so a row pairs with the
+        right USB handle even with two devices of the same model. When the
+        serial could not be read (devinfo is best-effort at connect), the
+        model's node stem decides — but only while exactly one device of
+        that model is open, because a guess between two identical units
+        would mute the wrong microphone.
+        """
+        node = source.get("node_name") or ""
+        for dev in self._devs:
+            serial = (dev.info or {}).get("serial")
+            if serial and serial in node:
+                return dev
+        candidates = [
+            dev for dev in self._devs
+            if self._NODE_STEMS.get(dev.profile.key, "\0") in node
+        ]
+        if len(candidates) == 1:
+            return candidates[0]
+        return None
+
+    def _sync_hw_mute(self, source, muted):
+        """Mirror a row mute onto the device's own mute, like the sidebar.
+
+        A muted Elgato row that leaves the hardware live reads as a lying
+        mute button: the device's LED says on-air while the matrix drops
+        the audio. Row mute therefore drives the firmware too — from a
+        click, the session bus, a scene, or a group hand-over alike. The
+        reverse direction stays hands-off: the hardware button is polled
+        into the sidebar, not into the matrix, so no loop.
+        """
+        dev = self._device_for_source(source)
+        if dev is None:
+            if source.get("node_name", "").find("Elgato") >= 0:
+                logging.warning(
+                    "row mute for %s: no open device matched, hardware "
+                    "mute not mirrored", source.get("name"))
+            return
+        self._usb_async(
+            lambda: dev.set_mute(bool(muted)),
+            on_error=lambda e: logging.warning(
+                "hardware mute mirror failed for %s: %s",
+                source.get("name"), e))
+        if dev is self.dev:
+            self._updating_ui = True
+            try:
+                self.mute_row.set_active(bool(muted))
+            finally:
+                self._updating_ui = False
+
     def toggle_source_mute(self, source_id):
         """Flip a source's mute. Returns the new state, or None if unknown.
 
@@ -1412,6 +1833,7 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         if cell is not None:
             cell.set_muted(muted)
         self.mixer.set_source_level(source_id, source.get("level", 1.0), muted)
+        self._sync_hw_mute(source, muted)
         if not muted:
             self._enforce_exclusive_group(source_id)
         sources_module.save(self._sources)
@@ -1449,6 +1871,191 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         self.mixer.set_cell(source_id, mix_id, current["volume"], muted)
         self._refresh_mix_emptiness()
         return muted
+
+    # --- Scenes -----------------------------------------------------------
+
+    def scene_names(self):
+        """{scene id: display name} for every stored scene."""
+        return {sid: s.get("name", sid)
+                for sid, s in scenes_module.load().items()}
+
+    def save_scene(self, name):
+        """Capture the current levels — matrix and hardware — under a name."""
+        if not name or not name.strip():
+            return None
+        payload = self.mixer.scene_state()
+        hardware = self._hardware_scene_state()
+        if hardware:
+            payload["hardware"] = hardware
+        sid = scenes_module.put(name.strip(), payload)
+        self._rebuild_scene_menu()
+        return sid
+
+    def apply_scene(self, sid):
+        """Recall a scene. Returns what was skipped, or None if it is gone.
+
+        Partial apply is normal: a scene naming a source or mix that no
+        longer exists sets what still matches and reports the rest. Sources
+        and cells go through the window's own setters so the widgets follow;
+        outputs and masters go through the mixer, which owns them.
+        """
+        scene = scenes_module.load().get(sid)
+        if scene is None:
+            return None
+        skipped = []
+
+        for source_id, entry in (scene.get("sources") or {}).items():
+            source = self._sources.get(source_id)
+            if source is None:
+                skipped.append(f"source {source_id}")
+                continue
+            self.set_source_volume(source_id, entry.get("level", 1.0))
+            if bool(source.get("muted", False)) != bool(entry.get("muted")):
+                # Toggle rather than write: unmuting a grouped microphone
+                # must take the group with it, however the unmute arrived.
+                self.toggle_source_mute(source_id)
+
+        for key, cell in (scene.get("cells") or {}).items():
+            source_id, _, mix_id = key.rpartition(".")
+            if source_id not in self._sources or mix_id not in self._mixes:
+                skipped.append(f"cell {key}")
+                continue
+            current = self.mixer.get_cell(source_id, mix_id)
+            self.set_cell_volume(source_id, mix_id, cell.get("volume", 0.0))
+            if bool(current["muted"]) != bool(cell.get("muted", False)):
+                self.toggle_cell_mute(source_id, mix_id)
+
+        skipped += self.mixer.apply_scene({
+            "outputs": scene.get("outputs") or {},
+            "volumes": scene.get("volumes") or {},
+        })
+        self._apply_scene_hardware(scene.get("hardware") or {}, skipped)
+        self._refresh_outputs()
+        self._refresh_mix_emptiness()
+        if skipped:
+            logging.info("scene %s: skipped %s", sid, ", ".join(skipped))
+        return skipped
+
+    def delete_scene(self, sid):
+        removed = scenes_module.remove(sid)
+        if removed:
+            self._rebuild_scene_menu()
+        return removed
+
+    def _hardware_scene_state(self):
+        """Every connected device's state, keyed by profile:serial, or {}.
+
+        Serial-keyed because two units of one model are different devices
+        with different gains; a scene keyed by model alone could only ever
+        describe one of them.
+        """
+        hardware = {}
+        keep = ("gain_raw", "mute", "hp_volume_db", "low_impedance",
+                "phantom", "monitor_mix")
+        for dev in self._devs:
+            try:
+                state = dev.get_all()
+            except Exception:
+                continue
+            key = scenes_module.hardware_key(
+                dev.profile.key, (dev.info or {}).get("serial", ""))
+            hardware[key] = {k: state[k] for k in keep if k in state}
+        return hardware
+
+    def _apply_scene_hardware(self, hardware, skipped):
+        """Apply a scene's device sections to whichever devices are here.
+
+        Each connected device picks its entry — exact serial first, then
+        the model (pre-serial scenes, or a replaced unit). Devices with no
+        entry and entries with no device both skip silently, except that a
+        scene carrying hardware with nothing connected at all is reported.
+        The gain lock wins over the selected device's gain — a locked
+        slider rejects a recall the same way it rejects a drag.
+        """
+        if not hardware:
+            return
+        if not self._devs:
+            skipped.append("hardware")
+            return
+        gain_locked = bool(getattr(self, "gain_lock", None)
+                           and self.gain_lock.get_active())
+        jobs = []
+        for dev in self._devs:
+            entry = scenes_module.pick_hardware_entry(
+                hardware, dev.profile.key, (dev.info or {}).get("serial", ""))
+            if entry is not None:
+                jobs.append((dev, dict(entry),
+                             gain_locked and dev is self.dev))
+        if not jobs:
+            skipped.append("hardware")
+            return
+
+        def _push():
+            for dev, entry, locked in jobs:
+                if "gain_raw" in entry and not locked:
+                    dev.set_gain_raw(int(entry["gain_raw"]))
+                if "mute" in entry:
+                    dev.set_mute(bool(entry["mute"]))
+                if "hp_volume_db" in entry:
+                    dev.set_hp_volume_db(float(entry["hp_volume_db"]))
+                if "low_impedance" in entry:
+                    dev.set_low_impedance(bool(entry["low_impedance"]))
+                if "phantom" in entry:
+                    dev.set_phantom(bool(entry["phantom"]))
+                if "monitor_mix" in entry:
+                    dev.set_monitor_mix(int(entry["monitor_mix"]))
+            return self.dev.get_all() if self.dev.connected else None
+
+        def _done(state):
+            if state is not None:
+                self._apply_state(state)
+
+        self._usb_async(_push, on_done=_done)
+
+    def _rebuild_scene_menu(self):
+        menu = Gio.Menu()
+        names = sorted(self.scene_names().items(), key=lambda kv: kv[1].lower())
+
+        recall = Gio.Menu()
+        for sid, name in names:
+            item = Gio.MenuItem.new(name, None)
+            item.set_action_and_target_value(
+                "app.apply-scene", GLib.Variant("s", sid))
+            recall.append_item(item)
+        if names:
+            menu.append_section(None, recall)
+
+        manage = Gio.Menu()
+        manage.append("Save current as…", "win.save-scene-as")
+        if names:
+            delete = Gio.Menu()
+            for sid, name in names:
+                item = Gio.MenuItem.new(name, None)
+                item.set_action_and_target_value(
+                    "app.delete-scene", GLib.Variant("s", sid))
+                delete.append_item(item)
+            manage.append_submenu("Delete scene", delete)
+        menu.append_section(None, manage)
+        self.scene_btn.set_menu_model(menu)
+
+    def prompt_save_scene(self):
+        dialog = Adw.AlertDialog(
+            heading="Save Scene",
+            body="Every trim, send, mute, output, master and device setting, "
+                 "as they are right now. Saving an existing name replaces it.",
+        )
+        entry = Gtk.Entry(placeholder_text="Streaming")
+        dialog.set_extra_child(entry)
+        dialog.add_response("cancel", "Cancel")
+        dialog.add_response("save", "Save")
+        dialog.set_response_appearance("save", Adw.ResponseAppearance.SUGGESTED)
+        dialog.set_default_response("save")
+
+        def _done(d, result):
+            if d.choose_finish(result) == "save":
+                self.save_scene(entry.get_text())
+
+        dialog.choose(self, None, _done)
 
     def remote_snapshot(self):
         """Everything a remote control needs to draw a button, as JSON."""
@@ -1519,6 +2126,7 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         cell = self.matrix.source(target_id)
         if cell is not None:
             cell.set_muted(False)
+        self._sync_hw_mute(target, False)
         self._enforce_exclusive_group(target_id)
         sources_module.save(self._sources)
 
@@ -1547,6 +2155,9 @@ class WaveXLRWindow(Adw.ApplicationWindow):
             cell = self.matrix.source(sid)
             if cell is not None:
                 cell.set_muted(True)
+            # A group hand-over hardware-mutes the loser too, so its on-air
+            # LED goes dark with the row instead of contradicting it.
+            self._sync_hw_mute(source, True)
 
     def _on_move_source_clicked(self, _matrix, source_id, delta):
         before = list(self._sources)
@@ -1617,10 +2228,15 @@ class WaveXLRWindow(Adw.ApplicationWindow):
     def _on_remove_source_clicked(self, _matrix, source_id):
         source = self._sources.get(source_id, {})
         name = source.get("name", "this source")
+        if sources_module.is_protected(source):
+            body = (f"This deletes “{name}” and its mix levels. If the device "
+                    f"is plugged back in, the row is offered again.")
+        else:
+            body = (f"This deletes “{name}” and its mix levels. The bound "
+                    f"application itself is not affected.")
         dialog = Adw.AlertDialog(
             heading="Remove source?",
-            body=f"This deletes “{name}” and its mix levels. The bound application "
-                 f"itself is not affected.",
+            body=body,
         )
         dialog.add_response("cancel", "Cancel")
         dialog.add_response("remove", "Remove")
@@ -1631,6 +2247,14 @@ class WaveXLRWindow(Adw.ApplicationWindow):
     def _on_remove_response(self, dialog, result, source_id):
         if dialog.choose_finish(result) != "remove":
             return
+        source = self._sources.get(source_id, {})
+        if sources_module.is_protected(source):
+            # Removing an unplugged device's row means "clean this up", not
+            # "never again": forgetting the node lets autodiscovery offer
+            # the row afresh when the device returns. (A plain app row the
+            # user deletes stays deleted — that memory is per offered node.)
+            self._offered_nodes.discard(source.get("node_name"))
+            self._save_ui_state()
         self.meter.stop(source_id)
         self._meter_targets.pop(source_id, None)
         self.matrix.remove_source(source_id)
@@ -1731,6 +2355,27 @@ class WaveXLRApp(Adw.Application):
         snapshot.connect("activate", self._action_refresh_snapshot)
         self.add_action(snapshot)
 
+        apply_scene = Gio.SimpleAction.new(
+            "apply-scene", GLib.VariantType.new("s"))
+        apply_scene.connect("activate", self._action_apply_scene)
+        self.add_action(apply_scene)
+
+        save_scene = Gio.SimpleAction.new(
+            "save-scene", GLib.VariantType.new("s"))
+        save_scene.connect("activate", self._action_save_scene)
+        self.add_action(save_scene)
+
+        delete_scene = Gio.SimpleAction.new(
+            "delete-scene", GLib.VariantType.new("s"))
+        delete_scene.connect("activate", self._action_delete_scene)
+        self.add_action(delete_scene)
+
+        scenes_state = Gio.SimpleAction.new_stateful(
+            "scenes", None, GLib.Variant("s", "{}"),
+        )
+        scenes_state.connect("activate", self._action_refresh_scenes)
+        self.add_action(scenes_state)
+
     def _action_switch_group(self, _action, parameter):
         if self._window is None or parameter is None:
             return
@@ -1802,6 +2447,40 @@ class WaveXLRApp(Adw.Application):
             action.set_state(GLib.Variant("s", self._window.remote_snapshot()))
         except Exception:                                   # noqa: BLE001
             logging.exception("snapshot failed")
+
+    def _action_apply_scene(self, _action, parameter):
+        if self._window is None or parameter is None:
+            return
+        try:
+            self._window.apply_scene(parameter.get_string())
+        except Exception:                                   # noqa: BLE001
+            logging.exception("apply-scene failed")
+
+    def _action_save_scene(self, _action, parameter):
+        if self._window is None or parameter is None:
+            return
+        try:
+            self._window.save_scene(parameter.get_string())
+        except Exception:                                   # noqa: BLE001
+            logging.exception("save-scene failed")
+
+    def _action_delete_scene(self, _action, parameter):
+        if self._window is None or parameter is None:
+            return
+        try:
+            self._window.delete_scene(parameter.get_string())
+        except Exception:                                   # noqa: BLE001
+            logging.exception("delete-scene failed")
+
+    def _action_refresh_scenes(self, action, _parameter):
+        """Publish {scene id: name} as JSON state, activate-then-describe."""
+        if self._window is None:
+            return
+        try:
+            action.set_state(GLib.Variant(
+                "s", json.dumps(self._window.scene_names())))
+        except Exception:                                   # noqa: BLE001
+            logging.exception("scenes failed")
 
     def do_command_line(self, command_line):
         options = command_line.get_options_dict()
@@ -1908,7 +2587,10 @@ class WaveXLRApp(Adw.Application):
         state = window._last_state or {}
         self._tray.set_state(
             bool(window.dev.connected),
-            bool(state.get("mute", False)),
+            # Any device's hardware mute counts: with two microphones the
+            # tray answering only for the selected one would show "live"
+            # while the mic actually in use is muted.
+            bool(state.get("mute", False)) or window._any_hw_muted,
             window.capture_rows_muted(),
         )
 

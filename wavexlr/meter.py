@@ -24,7 +24,12 @@ from .mixer import _set_pdeathsig  # share the pdeathsig helper
 
 class MeterMonitor:
     SAMPLE_RATE = 8000
-    CHUNK_BYTES = 256  # ~16 ms of s16 mono @ 8 kHz → ~60 Hz updates
+    # ~64 ms of s16 mono @ 8 kHz → ~15 Hz updates. Was 256 bytes / 60 Hz,
+    # which cost a GLib.idle_add per chunk per meter — over 400 main-loop
+    # wakeups a second across seven meters, for bars the eye cannot follow
+    # past ~15 Hz anyway. The peak of a 64 ms window still catches every
+    # transient; it is the standard meter integration ballpark.
+    CHUNK_BYTES = 1024
 
     def __init__(self):
         self._procs = {}        # source_id -> Popen
@@ -37,25 +42,34 @@ class MeterMonitor:
         # microphone in a quiet room is legitimately near zero.
         self._last_data = {}    # source_id -> monotonic seconds
 
-    def start(self, source_id, source_node_name, callback):
+    def start(self, source_id, source_node_name, callback, capture_sink=False):
         """Begin streaming peak values for `source_id`. Replaces any existing
         meter for that id. `callback(level: float)` is invoked on the main
-        thread at the chunk rate."""
+        thread at the chunk rate.
+
+        `capture_sink=True` meters a SINK by its monitor. Without it a
+        record stream targeting a sink is not an error: the session manager
+        quietly links it to the default source instead, so a mix meter
+        showed whatever microphone happened to be the default input.
+        """
         if source_id in self._procs:
             self.stop(source_id)
+        props = {
+            # Labelled so a level tap is identifiable in a mixer or a
+            # monitoring script. Unlabelled these appear as bare
+            # "pw-cat" entries indistinguishable from anyone else's.
+            "node.name": f"openwave_meter_{source_id}",
+            "node.description": f"OpenWave level meter ({source_id})",
+            "application.name": "OpenWave",
+        }
+        if capture_sink:
+            props["stream.capture.sink"] = True
         try:
             proc = subprocess.Popen(
                 [
                     "pw-cat", "--record",
                     "--target", source_node_name,
-                    # Labelled so a level tap is identifiable in a mixer or a
-                    # monitoring script. Unlabelled these appear as bare
-                    # "pw-cat" entries indistinguishable from anyone else's.
-                    "--properties", json.dumps({
-                        "node.name": f"openwave_meter_{source_id}",
-                        "node.description": f"OpenWave level meter ({source_id})",
-                        "application.name": "OpenWave",
-                    }),
+                    "--properties", json.dumps(props),
                     "--rate", str(self.SAMPLE_RATE),
                     "--channels", "1",
                     "--format", "s16",
@@ -83,6 +97,11 @@ class MeterMonitor:
         # look like a meter that simply has no history yet.
         self._last_data[source_id] = time.monotonic()
         thread.start()
+
+    def running(self, source_id):
+        """Whether a live meter subprocess exists for this id."""
+        proc = self._procs.get(source_id)
+        return proc is not None and proc.poll() is None
 
     def stop(self, source_id):
         flag = self._stop_flags.pop(source_id, None)

@@ -47,6 +47,7 @@ class MixMatrix(Gtk.Box):
         "remove-mix-clicked": (GObject.SignalFlags.RUN_FIRST, None, (str,)),
         # (mix_id, output name — a sink node.name, OUTPUT_AUTO or OUTPUT_NONE)
         "mix-output-changed": (GObject.SignalFlags.RUN_FIRST, None, (str, str)),
+        "mix-volume-changed": (GObject.SignalFlags.RUN_FIRST, None, (str, float)),
     }
 
     # Shown instead of deleting the only mix. The matrix's whole geometry is
@@ -70,7 +71,9 @@ class MixMatrix(Gtk.Box):
             margin_start=12,
             margin_end=12,
             margin_top=12,
-            margin_bottom=0,
+            # Matches the other three sides: at zero the last source row sat
+            # flush against the window edge and read as clipped.
+            margin_bottom=12,
         )
         wrapper.append(self._grid)
 
@@ -126,6 +129,10 @@ class MixMatrix(Gtk.Box):
             lambda _h, name, mid=mix_id: self.emit("mix-output-changed", mid, name),
         )
         header.connect(
+            "volume-changed",
+            lambda _h, value, mid=mix_id: self.emit("mix-volume-changed", mid, value),
+        )
+        header.connect(
             "rename-clicked", lambda _h, mid=mix_id: self.emit("rename-mix-clicked", mid),
         )
         header.connect(
@@ -163,6 +170,16 @@ class MixMatrix(Gtk.Box):
         enabled = len(self._mix_ids) > 1
         for header in self._headers.values():
             header.set_delete_enabled(enabled, self.LAST_MIX_REASON)
+
+    def set_mix_volume(self, mix_id, value):
+        header = self._headers.get(mix_id)
+        if header is not None:
+            header.set_volume(value)
+
+    def set_mix_level(self, mix_id, value):
+        header = self._headers.get(mix_id)
+        if header is not None:
+            header.set_level(value)
 
     def set_mix_empty(self, mix_id, empty):
         header = self._headers.get(mix_id)
@@ -389,6 +406,7 @@ class MixHeaderCell(Gtk.Box):
 
     __gsignals__ = {
         "output-changed": (GObject.SignalFlags.RUN_FIRST, None, (str,)),
+        "volume-changed": (GObject.SignalFlags.RUN_FIRST, None, (float,)),
         "rename-clicked": (GObject.SignalFlags.RUN_FIRST, None, ()),
         "remove-clicked": (GObject.SignalFlags.RUN_FIRST, None, ()),
     }
@@ -470,6 +488,48 @@ class MixHeaderCell(Gtk.Box):
         self._out_lbl.add_css_class("dim-label")
         self._out_lbl.add_css_class("caption")
         self._out_box.append(self._out_lbl)
+
+        # Master volume + live level. The master is a plain PipeWire sink
+        # volume anything may move (pavucontrol, a media key, a scene), so
+        # the slider is set from observation as much as it drives — writes
+        # go out through volume-changed, external moves come back through
+        # set_volume with the handler blocked.
+        vol_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        text.append(vol_row)
+        self._vol_scale = Gtk.Scale(
+            orientation=Gtk.Orientation.HORIZONTAL,
+            draw_value=False,
+            adjustment=Gtk.Adjustment(
+                lower=0.0, upper=1.0, step_increment=0.01, page_increment=0.05
+            ),
+            hexpand=True,
+            valign=Gtk.Align.CENTER,
+            round_digits=2,
+        )
+        self._vol_scale.add_css_class("openwave-mix-slider")
+        self._vol_scale.set_tooltip_text("Mix master volume")
+        self._vol_handler = self._vol_scale.connect(
+            "value-changed", self._on_volume_changed)
+        vol_row.append(self._vol_scale)
+        self._vol_pct = Gtk.Label(label="", xalign=1)
+        self._vol_pct.add_css_class("dim-label")
+        self._vol_pct.add_css_class("caption")
+        self._vol_pct.set_width_chars(4)
+        vol_row.append(self._vol_pct)
+
+        self._level = Gtk.LevelBar(
+            orientation=Gtk.Orientation.HORIZONTAL,
+            mode=Gtk.LevelBarMode.CONTINUOUS,
+            min_value=0.0,
+            max_value=1.0,
+            valign=Gtk.Align.CENTER,
+        )
+        self._level.set_size_request(-1, 6)
+        self._level.add_css_class("openwave-level")
+        self._level.add_offset_value(Gtk.LEVEL_BAR_OFFSET_LOW, 0.70)
+        self._level.add_offset_value(Gtk.LEVEL_BAR_OFFSET_HIGH, 0.90)
+        self._level.add_offset_value(Gtk.LEVEL_BAR_OFFSET_FULL, 1.00)
+        text.append(self._level)
 
         self._menu_btn = Gtk.MenuButton(
             icon_name="view-more-symbolic",
@@ -574,7 +634,43 @@ class MixHeaderCell(Gtk.Box):
         self._popdown()
         self.emit("remove-clicked")
 
+    def _on_volume_changed(self, scale):
+        value = scale.get_value()
+        self._vol_pct.set_label(f"{round(value * 100):d}%")
+        self.emit("volume-changed", value)
+
     # ----- setters -----
+    def set_volume(self, value):
+        """Reflect the master without firing the changed signal."""
+        value = max(0.0, min(1.0, value))
+        with GObject.signal_handler_block(self._vol_scale, self._vol_handler):
+            self._vol_scale.set_value(value)
+        self._vol_pct.set_label(f"{round(value * 100):d}%")
+
+    def set_level(self, value):
+        """Update the mix's live audio level bar from a raw peak (0.0–1.0).
+
+        Displayed as the CUBE root of amplitude, deliberately matching the
+        faders: cell and trim volumes are written with wpctl, whose taper
+        is cubic — a fader at 30% is 2.7% linear amplitude. Measured: a
+        0.31-peak source through a 0.3 fader arrives at the mix at 0.0084,
+        exactly 0.31 × 0.3³. A linear (or sqrt) bar therefore sat near
+        zero while the audio sounded like "30%"; on the cubic scale the
+        bar and the faders speak the same language, and full scale is
+        still full scale.
+
+        Peak-hold with decay on top: updates arrive per ~16 ms chunk at
+        ~60 Hz, and painting each chunk's own peak raw made the bar flicker
+        around the quiet windows between transients — reading far lower
+        than the audio. A new peak takes instantly; between peaks the
+        display decays with a ~140 ms half-life at the meter's ~15 Hz
+        update rate, which is how a hardware meter ballistically behaves.
+        """
+        shown = max(0.0, min(1.0, value)) ** (1.0 / 3.0)
+        held = getattr(self, "_level_held", 0.0) * 0.72
+        self._level_held = max(shown, held)
+        self._level.set_value(self._level_held)
+
     def set_title(self, title):
         self._title_lbl.set_label(title)
         self._title_lbl.set_tooltip_text(title)
@@ -822,16 +918,30 @@ class SourceCell(Gtk.Box):
             edit_btn.connect("clicked", lambda _: self.emit("edit-clicked"))
             inner.append(edit_btn)
 
+        self._remove_btn = None
         if removable:
-            remove_btn = Gtk.Button(
+            self._remove_btn = Gtk.Button(
                 icon_name="window-close-symbolic",
                 valign=Gtk.Align.CENTER,
                 tooltip_text="Remove source",
             )
-            remove_btn.add_css_class("flat")
-            remove_btn.add_css_class("circular")
-            remove_btn.connect("clicked", lambda _: self.emit("remove-clicked"))
-            inner.append(remove_btn)
+            self._remove_btn.add_css_class("flat")
+            self._remove_btn.add_css_class("circular")
+            self._remove_btn.connect(
+                "clicked", lambda _: self.emit("remove-clicked"))
+            inner.append(self._remove_btn)
+
+    def set_removable(self, removable, tooltip="Remove source"):
+        """Show or hide the remove button on a row that owns one.
+
+        Auto-discovered device rows are built with the button and normally
+        hide it: while the hardware is connected, removing its row would
+        only make it come back confusing. Unplugged, the row is clutter the
+        user may clear — so removability follows presence.
+        """
+        if self._remove_btn is not None:
+            self._remove_btn.set_visible(removable)
+            self._remove_btn.set_tooltip_text(tooltip)
 
     def set_group(self, group):
         """Show which exclusivity group this row is in, if any."""
