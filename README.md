@@ -2,6 +2,14 @@
 
 Linux control application for **Elgato Wave** audio devices — the **Wave XLR** microphone interface and the **Wave:3** microphone. A reverse-engineered replacement for Elgato Wave Link, built with GTK4 + Adwaita.
 
+![OpenWave](docs/screenshot.png)
+
+Sources are rows, mixes are columns, and each cell is how much of that source
+the mix receives. Above: an XLR Dock and an Arctis headset microphone grouped
+so only one is live at a time — the muted one is the red row — feeding a
+Personal Mix monitored on the headset, a Chat Mix published as a capture source
+for voice apps, and a Record Mix routed nowhere but still recordable.
+
 ## Supported devices
 
 | Device | USB ID | Controls |
