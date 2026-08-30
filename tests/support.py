@@ -55,6 +55,13 @@ def bare_mixer(**attrs):
     mx.mic = None
     mx.hp = None
     mx._started = False
+    # set_cell and friends enqueue their reconcile even with no worker
+    # running. The queue is the seam: work lands in _pending and stays there,
+    # so a test can call the real entry points and inspect the state they
+    # persisted without a subprocess ever being spawned.
+    mx._pending = {}
+    mx._pending_lock = threading.Lock()
+    mx._wake = threading.Event()
     for key, value in attrs.items():
         setattr(mx, key, value)
     return mx
