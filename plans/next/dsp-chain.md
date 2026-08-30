@@ -38,6 +38,42 @@ on; the replug self-heal applies to the FX node the same way.
 - The VAD grace-period knob is the one setting worth exposing (word
   onsets vs latency).
 
+### Tier 1b — more builtins (still zero dependencies)
+- **Presence EQ**: three bands from builtin biquads (`bq_lowshelf`,
+  `bq_peaking`, `bq_highshelf`) — broadcast-voice tone shaping.
+- **Mono downmix toggle**: a stereo capture forced to centered mono
+  (channel-mix in the FX node) — the fix for one-sided interfaces.
+- **Per-source delay**: millisecond alignment so mic and desktop audio
+  hit the Record/Stream mix in sync (builtin delay). Lives on any
+  source, not just microphones.
+
+### Tier 2b — more LADSPA classics
+- **De-esser** (TAP `tap_deesser`) — candidate plugin, verify at build.
+- **Auto-leveler / AGC** — slow-attack leveling so nobody rides gain.
+  Candidate: sc4 with leveler settings or TAP AGC; pick by ear at build
+  time, and say which plugin the toggle needs.
+
+### Mix-side chain (separate insertion point: before a mix's output
+loopback, or app-driven)
+- **Headphone EQ per mix**: biquad EQ on the *output* path (Personal Mix
+  → Arctis), AutoEq-style curves importable later. Same filter-chain
+  mechanics, different insertion point.
+- **Music ducking**: music dips when the microphone is live. Two
+  implementation shapes, decided at build: (a) LADSPA sidechain
+  compressor — blocked on filter-chain's single-capture-stream model,
+  probably a dead end; (b) **app-driven**: the per-source meters already
+  produce a 15 Hz voice envelope, and cell volumes are already written
+  through the throttler — ducking is a small control loop over machinery
+  that exists (watch mic meter, ease the Music cell down/up). (b) is the
+  recommendation: no DSP at all, scene-aware, and the release curve is
+  a Python constant instead of a plugin parameter.
+- **Loudness meter (LUFS)**: EBU R128 readout on the Record/Stream mix
+  so streams land near −14/−16 LUFS. Metering only. Needs a 48 kHz tap
+  (the 8 kHz level meters cannot carry K-weighting); spawn it only while
+  the readout is visible. K-weighting is two fixed biquads — pure
+  Python over the existing meter-reader pattern, `libebur128` optional
+  if the numbers disagree with OBS.
+
 ### Tier 4 — NVIDIA Maxine/Broadcast AFX (research track, promoted only
 if it earns it)
 Not scheduled; open questions to answer before any code:
@@ -72,6 +108,17 @@ of the source record — free, since they live on it.
 | FX node caught by default-sink election / claiming | Med | same priority.session=0 + sweep treatment as intake sinks |
 | Missing plugin libraries | Low | visible degraded state naming the package; Tier 1 always works |
 | RNNoise misclassifies poor mics | Low | it is a toggle; meters make the effect audible AND visible |
+
+## Suggested build order across it all
+
+1. Tier 1 low cut (proves the insertion end to end)
+2. Tier 1b EQ + mono + delay (same node, zero deps, big visible win)
+3. Tier 2 gate/comp/limiter, then 2b de-esser/AGC
+4. Tier 3 RNNoise
+5. Ducking (app-driven) and LUFS meter — independent of the FX node,
+   can land any time after the meters exist (they do)
+6. Headphone EQ per mix
+7. Tier 4 NVIDIA — only past its questions
 
 ## Promotion checklist (next → now)
 
