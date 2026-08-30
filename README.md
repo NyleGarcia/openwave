@@ -173,6 +173,10 @@ a Stream Deck plugin built on this.
 
 ## Install
 
+Tagged releases on the [Releases page](../../releases) carry ready-made
+objects: a `.deb` for Debian/Ubuntu (`sudo apt install ./openwave_*.deb`),
+a source tarball, and checksums.
+
 One-liner — detects Arch, Debian/Ubuntu, Fedora, openSUSE, or Void; installs deps and OpenWave:
 
 ```bash

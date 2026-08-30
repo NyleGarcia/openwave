@@ -1,0 +1,128 @@
+name: Release
+
+# Tag-driven semver, adapted from the Stream Deck plugin's release flow.
+# That repo computes versions with semantic-release from Angular commit
+# messages; this one writes prose commit subjects, which semantic-release
+# reads as "never release". So the version is the tag -- push v1.2.3 and
+# this builds the release objects -- and everything downstream of the
+# version (gate on the suite, build artifacts, publish a Release) is as
+# automatic as the plugin's.
+#
+#   git tag v1.2.3 && git push <remote> v1.2.3
+
+on:
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+*"]
+  # Buildable on demand so the artifact steps can be exercised without
+  # spending a version number; a dispatch run uploads workflow artifacts
+  # but publishes no Release.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Gate on the suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install libusb
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libusb-1.0-0
+      - name: Run unit tests
+        run: python -m unittest discover -s tests -t . -v
+      - name: Byte-compile every module
+        run: python -m compileall -q wavexlr tests
+
+  build:
+    name: Build release objects
+    needs: [test]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: version
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            echo "version=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=0.0.0-dev.${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Source tarball
+        run: |
+          V="${{ steps.version.outputs.version }}"
+          git archive --format=tar.gz --prefix="openwave-${V}/" \
+            -o "openwave-${V}.tar.gz" HEAD
+
+      # A .deb built on the runner installs into the runner distribution's
+      # own site-packages path (the Makefile asks the interpreter), which is
+      # the right path for the systems that will install the .deb. Depends
+      # mirrors install.sh's apt list; python3-xlib is Recommends, matching
+      # its strictly-optional status.
+      - name: Debian package
+        run: |
+          V="${{ steps.version.outputs.version }}"
+          PKG="openwave_${V}_all"
+          # SITEPKG pinned: the Makefile asks the interpreter, and Ubuntu's
+          # system python answers /usr/local/... first -- the right path for
+          # a live install on that machine, the wrong one inside a package.
+          make install DESTDIR="$PWD/$PKG" PREFIX=/usr \
+            SITEPKG=/usr/lib/python3/dist-packages
+          mkdir -p "$PKG/DEBIAN"
+          cat > "$PKG/DEBIAN/control" <<EOF
+          Package: openwave
+          Version: ${V}
+          Section: sound
+          Priority: optional
+          Architecture: all
+          Depends: python3 (>= 3.10), python3-gi, gir1.2-gtk-4.0, gir1.2-adw-1, libadwaita-1-0, libusb-1.0-0, pipewire
+          Recommends: python3-xlib
+          Maintainer: OpenWave contributors
+          Homepage: https://github.com/rikkichy/openwave
+          Description: The audio mixing matrix for Linux
+           Per-app mixes with per-mix outputs, plus native control of Elgato
+           Wave hardware - the Wave XLR interface (original and MK.2/XLR
+           Dock) and the Wave:3 microphone.
+          EOF
+          dpkg-deb --build --root-owner-group "$PKG"
+
+      - name: Checksums
+        run: sha256sum openwave-*.tar.gz openwave_*.deb > sha256sums.txt
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-objects
+          path: |
+            openwave-*.tar.gz
+            openwave_*.deb
+            sha256sums.txt
+
+  publish:
+    name: Publish Release
+    needs: [build]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-objects
+      - name: Create Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF#refs/tags/}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "OpenWave ${GITHUB_REF#refs/tags/v}" \
+            --generate-notes \
+            openwave-*.tar.gz openwave_*.deb sha256sums.txt
