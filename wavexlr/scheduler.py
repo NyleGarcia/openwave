@@ -1,4 +1,8 @@
-"""Scheduler — the timing/threading seam the DeviceController runs on.
+"""Scheduler — the timing/threading seam device work runs on.
+
+Ported from CryoByte33/openwave (github.com/CryoByte33/openwave): both the
+Scheduler seam and the Throttler's leading/periodic/trailing pacing are
+cryobyte33's design, taken essentially verbatim.
 
 The controller never touches GLib or threads directly: it asks a Scheduler to
 run blocking USB work off the main thread and to fire repeating timers, and to

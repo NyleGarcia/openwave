@@ -306,6 +306,14 @@ first, since the firmware serves one process at a time.
 
 USB protocol reverse-engineered from the macOS Wave Link application using Frida. Inspired by [GoXLR-on-Linux/goxlr-utility](https://github.com/GoXLR-on-Linux/goxlr-utility).
 
+Several ideas and two modules are ported from
+[CryoByte33/openwave](https://github.com/CryoByte33/openwave), a sibling fork:
+the friendly-app-name resolution (`wmnames.py` and the generic-name rules),
+the slider `Throttler` and its scheduler seam, ALSA control discovery by
+name suffix, the hotplug reconnect loop, and the duplicate-source picker
+guard. cryobyte33's fork also decoded the Wave XLR MK.2 (`0fd9:00b6`) vendor
+protocol, which this tree defers only for lack of that hardware.
+
 ## License
 
 MIT

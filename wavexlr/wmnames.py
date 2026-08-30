@@ -1,5 +1,9 @@
 """Best-effort friendly app names from the X11 window manager.
 
+Ported from CryoByte33/openwave (github.com/CryoByte33/openwave), essentially
+verbatim -- the design, the PID-to-window bridge and the WM_CLASS-vs-title
+rule are cryobyte33's work.
+
 Apps that play audio through the ALSA->PulseAudio bridge report a generic
 PipeWire name ("ALSA plug-in [java]"), but their owning X11 window usually
 carries the real one ("RuneLite"). We bridge the two the way KDE does: match the
