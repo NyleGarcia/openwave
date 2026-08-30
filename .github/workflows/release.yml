@@ -97,8 +97,22 @@ jobs:
           EOF
           dpkg-deb --build --root-owner-group "$PKG"
 
+      # noarch rpm from the spec: module under /usr/share/openwave with
+      # PYTHONPATH launchers, so one rpm serves every Fedora python.
+      - name: RPM package
+        run: |
+          V="${{ steps.version.outputs.version }}"
+          sudo apt-get install -y -qq rpm
+          mkdir -p rpmbuild/{SOURCES,SPECS}
+          cp "openwave-${V}.tar.gz" rpmbuild/SOURCES/
+          sed "s/@VERSION@/${V}/" packaging/rpm/openwave.spec \
+            > rpmbuild/SPECS/openwave.spec
+          rpmbuild --define "_topdir $PWD/rpmbuild" \
+            --define "dist %{nil}" -bb rpmbuild/SPECS/openwave.spec
+          cp rpmbuild/RPMS/noarch/openwave-*.rpm .
+
       - name: Checksums
-        run: sha256sum openwave-*.tar.gz openwave_*.deb > sha256sums.txt
+        run: sha256sum openwave-*.tar.gz openwave_*.deb openwave-*.rpm > sha256sums.txt
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
@@ -107,6 +121,7 @@ jobs:
           path: |
             openwave-*.tar.gz
             openwave_*.deb
+            openwave-*.rpm
             sha256sums.txt
 
   publish:
