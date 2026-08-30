@@ -1,5 +1,7 @@
 """StatusNotifierItem tray icon via D-Bus (no GTK3 dependency)."""
 
+import logging
+
 from gi.repository import Gio, GLib
 
 ITEM_XML = """
@@ -25,6 +27,11 @@ ITEM_XML = """
       <arg name="x" type="i" direction="in"/>
       <arg name="y" type="i" direction="in"/>
     </method>
+    <signal name="NewIcon"/>
+    <signal name="NewToolTip"/>
+    <signal name="NewStatus">
+      <arg name="status" type="s" direction="out"/>
+    </signal>
   </interface>
 </node>
 """
@@ -85,6 +92,67 @@ MENU_XML = """
 """
 
 
+# Shipped in hicolor by the Makefile rather than borrowed from the active
+# theme, so the tray does not depend on the theme having a microphone glyph --
+# the same assumption that left the Browser row drawing a broken image under
+# Breeze.
+ICON_LIVE = "openwave-symbolic"
+ICON_MUTED = "openwave-muted-symbolic"
+ICON_ABSENT = "openwave-attention-symbolic"
+
+
+def compute(connected, hardware_muted, row_muted):
+    """What the tray should show, from the three facts that decide it.
+
+    A pure function, kept apart from the D-Bus object because the rule is the
+    part worth testing and the plumbing needs a session bus to exist.
+
+    There are two mutes on one microphone and they are independent. The USB
+    bit is what the hardware button and the mute switch in the window move.
+    The row mute is a PipeWire one on the source row, and handing a microphone
+    group over moves it without touching the hardware at all -- that is what
+    hand-over is. So the states disagree routinely rather than exceptionally,
+    and a tray that reads only the USB bit reports a live microphone while
+    nothing is being captured. That is the worst thing this icon can do: the
+    only reason to look at it is to find out whether you are on air, and it
+    would be confidently wrong exactly when the answer matters.
+
+    Either mute means not captured, so either one shows muted. The tooltip
+    says which, because the way out differs -- the hardware button will not
+    clear a row mute, and a user who has pressed it and seen nothing change
+    has no other way to find out why.
+    """
+    if not connected:
+        return {
+            "icon": ICON_ABSENT,
+            "status": "Active",
+            "tooltip": "No Wave connected",
+            "mute_label": "Mute Mic",
+            "mute_enabled": False,
+            "muted": False,
+        }
+
+    muted = bool(hardware_muted or row_muted)
+    if muted:
+        if hardware_muted and row_muted:
+            detail = "Muted (hardware and matrix)"
+        elif hardware_muted:
+            detail = "Muted (hardware)"
+        else:
+            detail = "Muted (matrix row)"
+    else:
+        detail = "Live"
+
+    return {
+        "icon": ICON_MUTED if muted else ICON_LIVE,
+        "status": "Active",
+        "tooltip": detail,
+        "mute_label": "Unmute Mic" if muted else "Mute Mic",
+        "mute_enabled": True,
+        "muted": muted,
+    }
+
+
 class TrayIcon:
     """Minimal StatusNotifierItem tray icon."""
 
@@ -103,6 +171,10 @@ class TrayIcon:
         self._name_id = None
         self._revision = 1
         self._menu_items = {}  # id -> properties dict
+        # Nothing is known before the first poll, and "no device" is the
+        # honest reading of that -- not "live", which would be a guess in the
+        # one direction this icon must never guess.
+        self._state = compute(False, False, False)
 
     @staticmethod
     def host_available(bus=None):
@@ -182,6 +254,54 @@ class TrayIcon:
             # registration; whatever the reason, nothing will draw us.
             return False
 
+    def set_state(self, connected, hardware_muted=False, row_muted=False):
+        """Show what the microphone is actually doing. Returns True if it moved.
+
+        Announced only on a real change: the poll behind this runs at 10 Hz,
+        and a host redraws on every NewIcon it is handed.
+        """
+        new = compute(connected, hardware_muted, row_muted)
+        if new == self._state:
+            return False
+
+        icon_changed = new["icon"] != self._state["icon"]
+        tooltip_changed = new["tooltip"] != self._state["tooltip"]
+        menu_changed = (
+            new["mute_label"] != self._state["mute_label"]
+            or new["mute_enabled"] != self._state["mute_enabled"]
+        )
+        self._state = new
+        self._build_menu_items()
+
+        if self._bus is None:
+            return True  # not registered yet; the values are already right
+        if icon_changed:
+            self._emit_item("NewIcon", None)
+        if tooltip_changed:
+            self._emit_item("NewToolTip", None)
+        if menu_changed:
+            self._emit_menu_properties(2)
+        return True
+
+    def _emit_item(self, name, params):
+        """A host that has gone away must not take the application with it."""
+        try:
+            self._bus.emit_signal(
+                None, "/StatusNotifierItem", "org.kde.StatusNotifierItem",
+                name, params)
+        except GLib.Error as e:
+            logging.debug("tray: could not emit %s: %s", name, e)
+
+    def _emit_menu_properties(self, item_id):
+        props = self._menu_items.get(item_id, {})
+        try:
+            self._bus.emit_signal(
+                None, "/MenuBar", "com.canonical.dbusmenu",
+                "ItemsPropertiesUpdated",
+                GLib.Variant("(a(ia{sv})a(ias))", ([(item_id, props)], [])))
+        except GLib.Error as e:
+            logging.debug("tray: could not emit ItemsPropertiesUpdated: %s", e)
+
     def _on_item_call(self, conn, sender, path, iface, method, params, invocation):
         if method == "Activate":
             if self._on_activate:
@@ -193,9 +313,11 @@ class TrayIcon:
             "Category": GLib.Variant("s", "Hardware"),
             "Id": GLib.Variant("s", "openwave"),
             "Title": GLib.Variant("s", "OpenWave"),
-            "Status": GLib.Variant("s", "Active"),
-            "IconName": GLib.Variant("s", "audio-input-microphone-symbolic"),
-            "ToolTip": GLib.Variant("(sa(iiay)ss)", ("", [], "OpenWave", "Elgato Wave Control")),
+            "Status": GLib.Variant("s", self._state["status"]),
+            "IconName": GLib.Variant("s", self._state["icon"]),
+            "ToolTip": GLib.Variant(
+                "(sa(iiay)ss)",
+                ("", [], "OpenWave", self._state["tooltip"])),
             "Menu": GLib.Variant("o", "/MenuBar"),
             "ItemIsMenu": GLib.Variant("b", False),
         }
@@ -209,13 +331,13 @@ class TrayIcon:
                 "label": GLib.Variant("s", "Open OpenWave"),
                 "visible": GLib.Variant("b", True),
                 "enabled": GLib.Variant("b", True),
-                "icon-name": GLib.Variant("s", "audio-input-microphone-symbolic"),
+                "icon-name": GLib.Variant("s", ICON_LIVE),
             },
             2: {
-                "label": GLib.Variant("s", "Mute Mic"),
+                "label": GLib.Variant("s", self._state["mute_label"]),
                 "visible": GLib.Variant("b", True),
-                "enabled": GLib.Variant("b", True),
-                "icon-name": GLib.Variant("s", "microphone-sensitivity-muted-symbolic"),
+                "enabled": GLib.Variant("b", self._state["mute_enabled"]),
+                "icon-name": GLib.Variant("s", ICON_MUTED),
             },
             3: {
                 "type": GLib.Variant("s", "separator"),

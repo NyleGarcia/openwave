@@ -6,6 +6,7 @@ BINDIR = $(DESTDIR)$(PREFIX)/bin
 DATADIR = $(DESTDIR)$(PREFIX)/share
 APPDIR = $(DATADIR)/openwave
 DESKTOPDIR = $(DATADIR)/applications
+ICONDIR = $(DATADIR)/icons/hicolor
 DOCDIR = $(DATADIR)/doc/openwave
 LICENSEDIR = $(DATADIR)/licenses/openwave
 
@@ -26,8 +27,19 @@ install: check-prefix
 	install -Dm644 openwave-autostart.desktop $(APPDIR)/openwave-autostart.desktop
 	install -Dm644 wireplumber/51-openwave-wave-xlr.conf $(APPDIR)/wireplumber/51-openwave-wave-xlr.conf
 	install -Dm644 pipewire/52-openwave-mixes.conf $(APPDIR)/pipewire/52-openwave-mixes.conf
+	install -Dm644 icons/openwave.svg $(ICONDIR)/scalable/apps/openwave.svg
+	install -Dm644 icons/openwave-symbolic.svg $(ICONDIR)/symbolic/apps/openwave-symbolic.svg
+	install -Dm644 icons/openwave-muted-symbolic.svg $(ICONDIR)/symbolic/apps/openwave-muted-symbolic.svg
+	install -Dm644 icons/openwave-attention-symbolic.svg $(ICONDIR)/symbolic/apps/openwave-attention-symbolic.svg
 	install -Dm644 README.md $(DOCDIR)/README.md
 	install -Dm644 LICENSE $(LICENSEDIR)/LICENSE
+# hicolor keeps a cache, and GTK trusts it over the directory when it is
+# there: a stale one hides an icon that was just installed, which looks
+# exactly like the icon being wrong. Skipped for a staged build, where the
+# packaging tool owns the cache.
+	@if [ -z "$(DESTDIR)" ] && command -v gtk-update-icon-cache >/dev/null 2>&1; then \
+		gtk-update-icon-cache -qtf $(ICONDIR) 2>/dev/null || true; \
+	fi
 
 uninstall:
 	rm -rf $(DESTDIR)$(SITEPKG)/wavexlr
@@ -36,6 +48,10 @@ uninstall:
 	rm -f $(DESKTOPDIR)/openwave.desktop
 	rm -rf $(APPDIR)
 	rm -rf $(DOCDIR)
+	rm -f $(ICONDIR)/scalable/apps/openwave.svg
+	rm -f $(ICONDIR)/symbolic/apps/openwave-symbolic.svg
+	rm -f $(ICONDIR)/symbolic/apps/openwave-muted-symbolic.svg
+	rm -f $(ICONDIR)/symbolic/apps/openwave-attention-symbolic.svg
 	rm -rf $(LICENSEDIR)
 
 # site-packages is chosen by the interpreter and is an absolute path: it does

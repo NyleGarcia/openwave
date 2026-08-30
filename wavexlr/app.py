@@ -607,6 +607,7 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         self.status_label.add_css_class("dim-label")
         self.dev.disconnect()
         self._stop_polling()
+        self._notify_tray()
 
     def _apply_profile(self, profile):
         """Adapt the UI to the connected device model."""
@@ -651,12 +652,32 @@ class WaveXLRWindow(Adw.ApplicationWindow):
             self.mix_label.set_label(f"{state['monitor_mix'] / 256:.0f}%")
         # Gain and mute live in the sidebar; no matrix row mirrors them.
         self._updating_ui = False
+        self._notify_tray()
+
+    def capture_rows_muted(self):
+        """True when no capture row is live.
+
+        The other half of being on air. Group hand-over mutes a row and
+        touches no hardware, so with two microphones grouped the one that is
+        not live is muted here and nowhere else. With no capture rows at all
+        there is nothing to be silenced by, which is not the same as muted.
+        """
+        rows = [s for s in self._sources.values() if s.get("node_name")]
+        if not rows:
+            return False
+        return all(s.get("muted", False) for s in rows)
+
+    def _notify_tray(self):
+        app = self.get_application()
+        if app is not None:
+            app.refresh_tray()
 
     def _on_usb_error(self, e):
         self.status_label.set_label("Disconnected")
         self.status_label.add_css_class("dim-label")
         self.dev.disconnect()
         self._stop_polling()
+        self._notify_tray()
 
     def _on_mute_changed(self, row, _pspec):
         if self._updating_ui or not self.dev.connected:
@@ -1256,6 +1277,7 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         if not muted:
             self._enforce_exclusive_group(source_id)
         sources_module.save(self._sources)
+        self._notify_tray()
 
     def _on_group_sources_clicked(self, _matrix, dragged_id, target_id):
         """Put the dragged source in the target's group.
@@ -1350,6 +1372,7 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         if not muted:
             self._enforce_exclusive_group(source_id)
         sources_module.save(self._sources)
+        self._notify_tray()
         return muted
 
     def set_cell_volume(self, source_id, mix_id, volume):
@@ -1828,6 +1851,23 @@ class WaveXLRApp(Adw.Application):
         self._tray = tray
         # Keep app alive when window is hidden
         self.hold()
+        self.refresh_tray()
+
+    def refresh_tray(self):
+        """Push what the microphone is really doing to the tray icon.
+
+        Cheap to call from anywhere either mute can move: set_state does
+        nothing at all unless the computed state actually differs.
+        """
+        if not self._tray or not self._window:
+            return
+        window = self._window
+        state = window._last_state or {}
+        self._tray.set_state(
+            bool(window.dev.connected),
+            bool(state.get("mute", False)),
+            window.capture_rows_muted(),
+        )
 
     def _toggle_mute(self):
         if self._window and self._window.dev.connected:
