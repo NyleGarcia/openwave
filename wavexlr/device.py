@@ -114,11 +114,10 @@ def _amixer(card, *args):
 def _alsa_get(card):
     """Read ALSA mute and HP volume."""
     state = {}
-    # Mute (numid=5)
-    out = _amixer(card, "cget", "numid=5")
+    out = _amixer(card, "cget", f"numid={_numid(card, 'mute')}")
     state["mute"] = ": values=off" in out
-    # HP volume (numid=4) — raw ALSA value 0-120
-    out = _amixer(card, "cget", "numid=4")
+    # HP volume — raw ALSA value 0-120
+    out = _amixer(card, "cget", f"numid={_numid(card, 'hp_vol')}")
     for line in out.splitlines():
         if ": values=" in line:
             try:
@@ -126,6 +125,57 @@ def _alsa_get(card):
             except ValueError:
                 pass
     return state
+
+
+# ALSA control name suffix -> role. The numids 4/5/6 hold on the hardware in
+# hand but are not promised across firmware revisions or models; the control
+# NAMES vary only in their product-string prefix ("PCM Playback Volume",
+# "Mic Capture Switch" on the XLR Dock), so the suffix is the stable handle.
+# Ported from CryoByte33/openwave and verified against a live 0fd9:00a6 Dock,
+# where discovery resolves to exactly the numbers below.
+_ALSA_ROLE_SUFFIX = {
+    "Capture Switch": "mute",
+    "Capture Volume": "gain",
+    "Playback Volume": "hp_vol",
+}
+_ALSA_ROLE_FALLBACK = {"mute": 5, "gain": 6, "hp_vol": 4}
+_ALSA_NUMIDS = {}  # card -> {role: numid}, cached like the maxima below
+
+
+def _discover_numids(card):
+    """{role: numid} scanned from `amixer contents`, by control-name suffix.
+
+    One pass also feeds the max cache, so discovery costs no extra calls.
+    Anything not found falls back to the historical hardcoded numid, so a
+    device this has never seen behaves exactly as before.
+    """
+    if card in _ALSA_NUMIDS:
+        return _ALSA_NUMIDS[card]
+    found = {}
+    cur_id = cur_name = None
+    for line in _amixer(card, "contents").splitlines():
+        stripped = line.strip()
+        m = re.match(r"numid=(\d+),iface=(\w+),name='(.*)'", stripped)
+        if m:
+            cur_id, iface, cur_name = int(m.group(1)), m.group(2), m.group(3)
+            if iface != "MIXER":
+                cur_id = cur_name = None
+            continue
+        if cur_id is not None and stripped.startswith("; type="):
+            role = next((r for suffix, r in _ALSA_ROLE_SUFFIX.items()
+                         if cur_name.endswith(suffix)), None)
+            if role and role not in found:
+                found[role] = cur_id
+                m = re.search(r",max=(-?\d+)", stripped)
+                if m:
+                    _ALSA_CTL_MAX[(card, cur_id)] = int(m.group(1))
+    _ALSA_NUMIDS[card] = found
+    return found
+
+
+def _numid(card, role):
+    """The numid carrying a role on this card, discovered or historical."""
+    return _discover_numids(card).get(role, _ALSA_ROLE_FALLBACK[role])
 
 
 # Control ranges differ per device and per kernel driver, so they are read
@@ -143,19 +193,22 @@ def _alsa_ctl_max(card, numid, fallback):
 
 
 def _alsa_set_mute(card, muted):
-    _amixer(card, "cset", "numid=5", "off" if muted else "on")
+    _amixer(card, "cset", f"numid={_numid(card, 'mute')}",
+            "off" if muted else "on")
 
 
 def _alsa_set_hp_vol(card, value):
-    """Set ALSA HP volume (numid=4), clamped to the control's real range."""
-    top = _alsa_ctl_max(card, 4, 120)
-    _amixer(card, "cset", "numid=4", str(max(0, min(top, value))))
+    """Set ALSA HP volume, clamped to the control's real range."""
+    numid = _numid(card, "hp_vol")
+    top = _alsa_ctl_max(card, numid, 120)
+    _amixer(card, "cset", f"numid={numid}", str(max(0, min(top, value))))
 
 
 def _alsa_set_gain(card, value):
-    """Set ALSA mic gain (numid=6), clamped to the control's real range."""
-    top = _alsa_ctl_max(card, 6, 150)
-    _amixer(card, "cset", "numid=6", str(max(0, min(top, value))))
+    """Set ALSA mic gain, clamped to the control's real range."""
+    numid = _numid(card, "gain")
+    top = _alsa_ctl_max(card, numid, 150)
+    _amixer(card, "cset", f"numid={numid}", str(max(0, min(top, value))))
 
 
 def _fw_gain_to_alsa(fw_gain_raw, scale):
