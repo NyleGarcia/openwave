@@ -206,7 +206,10 @@ from a checkout that has since been installed properly would otherwise keep
 launching a path that no longer exists.
 
 **Start at login** and **Start in the tray** are switches in the sidebar,
-under *Startup*. They write `~/.config/autostart/openwave.desktop`, adding
+under *Startup*. Starting in the tray needs a tray: GNOME ships no
+StatusNotifier host, so without an AppIndicator extension OpenWave shows its
+window instead of hiding into nothing, and closing the window quits rather
+than making it disappear. They write `~/.config/autostart/openwave.desktop`, adding
 `--hide` for the tray-only case. Turning autostart off deletes that file;
 the drawer entry is a separate file and is left alone.
 

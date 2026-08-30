@@ -195,3 +195,34 @@ class MeterSilence(unittest.TestCase):
         self.meter._procs["dock"] = Exited()
         self.meter._last_data["dock"] = _time.monotonic() - 999.0
         self.assertIsNone(self.meter.silent_for("dock"))
+
+
+class TrayHostProbe(unittest.TestCase):
+    """Whether a tray exists decides whether hiding the window is safe."""
+
+    def _probe(self, answer):
+        import gi
+        gi.require_version("Gtk", "4.0")
+        from gi.repository import GLib
+        from wavexlr.tray import TrayIcon
+
+        class Bus:
+            def call_sync(self, *a, **k):
+                if isinstance(answer, Exception):
+                    raise answer
+                return GLib.Variant("(b)", (answer,))
+
+        return TrayIcon.host_available(Bus())
+
+    def test_a_watcher_on_the_bus_means_yes(self):
+        self.assertTrue(self._probe(True))
+
+    def test_no_watcher_means_no(self):
+        """GNOME ships no StatusNotifier host: the name appears only when an
+        AppIndicator extension is installed."""
+        self.assertFalse(self._probe(False))
+
+    def test_a_bus_error_means_no(self):
+        from gi.repository import GLib
+        self.assertFalse(self._probe(
+            GLib.Error.new_literal(GLib.quark_from_string("g-io"), "x", 0)))

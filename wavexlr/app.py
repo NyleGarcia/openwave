@@ -1756,7 +1756,12 @@ class WaveXLRApp(Adw.Application):
             self._setup_tray()
             if self._start_hidden:
                 self._start_hidden = False  # only first launch
-                return
+                if self._tray is None:
+                    logging.warning(
+                        "--hide was asked for but this desktop has no system "
+                        "tray; showing the window instead")
+                else:
+                    return
         self._window.present()
 
     def _load_css(self):
@@ -1799,13 +1804,27 @@ class WaveXLRApp(Adw.Application):
         return False  # normal close → quit
 
     def _setup_tray(self):
+        """Publish a tray icon, but only claim one if it will be drawn.
+
+        self._tray doubles as "hiding the window is safe", so it must not be
+        set by merely constructing the object: GNOME ships no StatusNotifier
+        host, and registering into a session with no watcher succeeds
+        silently. Hiding into that is a window nobody can get back.
+        """
         from .tray import TrayIcon
-        self._tray = TrayIcon(
+        tray = TrayIcon(
             on_activate=self._toggle_window,
+            on_open=self._present_window,
             on_mute=self._toggle_mute,
             on_quit=self._quit_app,
         )
-        self._tray.register()
+        if not tray.register():
+            logging.info(
+                "no system tray on this desktop; the window will close "
+                "normally instead of hiding")
+            self._tray = None
+            return
+        self._tray = tray
         # Keep app alive when window is hidden
         self.hold()
 
@@ -1822,11 +1841,23 @@ class WaveXLRApp(Adw.Application):
         self.quit()
 
     def _toggle_window(self):
+        """Clicking the tray icon: show if hidden, hide if shown."""
         if self._window:
             if self._window.get_visible():
                 self._window.set_visible(False)
             else:
                 self._window.present()
+
+    def _present_window(self):
+        """The "Open OpenWave" menu item. Always opens.
+
+        Separate from the icon click on purpose: a menu item that reads Open
+        and hides the window when it is already open is a toggle wearing the
+        wrong label, and it is the only way back to a window that was started
+        hidden.
+        """
+        if self._window:
+            self._window.present()
 
     def _show_setup_dialog(self):
         dialog = Adw.AlertDialog(

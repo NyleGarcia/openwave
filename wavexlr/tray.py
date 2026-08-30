@@ -88,8 +88,13 @@ MENU_XML = """
 class TrayIcon:
     """Minimal StatusNotifierItem tray icon."""
 
-    def __init__(self, on_activate=None, on_mute=None, on_quit=None):
+    def __init__(self, on_activate=None, on_mute=None, on_quit=None,
+                 on_open=None):
         self._on_activate = on_activate
+        # Separate from on_activate: clicking the icon may toggle, but the
+        # menu item reads "Open OpenWave" and must open. It is also the only
+        # way back to a window that was started hidden.
+        self._on_open = on_open or on_activate
         self._on_mute = on_mute
         self._on_quit = on_quit
         self._bus = None
@@ -99,7 +104,32 @@ class TrayIcon:
         self._revision = 1
         self._menu_items = {}  # id -> properties dict
 
+    @staticmethod
+    def host_available(bus=None):
+        """True when something on this session bus will actually draw us.
+
+        Asked before anything is allowed to depend on the tray existing.
+        GNOME ships no StatusNotifier host of its own -- the watcher name
+        appears only when an AppIndicator extension is installed -- so on a
+        stock GNOME desktop a tray icon is registered successfully and drawn
+        nowhere, which is indistinguishable from working right up until the
+        window is hidden into it.
+        """
+        try:
+            bus = bus or Gio.bus_get_sync(Gio.BusType.SESSION, None)
+            reply = bus.call_sync(
+                "org.freedesktop.DBus", "/org/freedesktop/DBus",
+                "org.freedesktop.DBus", "NameHasOwner",
+                GLib.Variant("(s)", ("org.kde.StatusNotifierWatcher",)),
+                GLib.VariantType.new("(b)"), Gio.DBusCallFlags.NONE, 2000,
+                None,
+            )
+        except GLib.Error:
+            return False
+        return bool(reply.unpack()[0])
+
     def register(self):
+        """Publish the tray item. Returns True if a host will draw it."""
         self._bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
         self._build_menu_items()
 
@@ -131,6 +161,9 @@ class TrayIcon:
             None, None,
         )
 
+        if not self.host_available(self._bus):
+            return False
+
         # Register with the StatusNotifierWatcher
         try:
             self._bus.call_sync(
@@ -143,8 +176,11 @@ class TrayIcon:
                 Gio.DBusCallFlags.NONE,
                 -1, None,
             )
-        except Exception:
-            pass  # no watcher running — tray won't show but app still works
+            return True
+        except GLib.Error:
+            # The watcher answered NameHasOwner and then refused the
+            # registration; whatever the reason, nothing will draw us.
+            return False
 
     def _on_item_call(self, conn, sender, path, iface, method, params, invocation):
         if method == "Activate":
@@ -232,8 +268,8 @@ class TrayIcon:
             item_id = params[0]
             event_id = params[1]
             if event_id == "clicked":
-                if item_id == 1 and self._on_activate:
-                    self._on_activate()
+                if item_id == 1 and self._on_open:
+                    self._on_open()
                 elif item_id == 2 and self._on_mute:
                     self._on_mute()
                 elif item_id == 4 and self._on_quit:
