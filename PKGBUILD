@@ -7,6 +7,7 @@ arch=('any')
 url="https://github.com/rikkichy/openwave"
 license=('MIT')
 depends=('python' 'python-gobject' 'gtk4' 'libadwaita' 'libusb' 'pipewire')
+optdepends=('python-xlib: friendly app names in the Add Source picker')
 source=("$pkgname-$pkgver.tar.gz::https://github.com/rikkichy/openwave/archive/refs/tags/v$pkgver.tar.gz")
 sha256sums=('SKIP')
 

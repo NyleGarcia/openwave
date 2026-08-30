@@ -13,7 +13,7 @@
         system:
         let
           pkgs = nixpkgs.legacyPackages.${system};
-          pythonEnv = pkgs.python3.withPackages (ps: [ ps.pygobject3 ]);
+          pythonEnv = pkgs.python3.withPackages (ps: [ ps.pygobject3 ps.xlib ]);
           sitePkgs = pkgs.python3.sitePackages; # "lib/python3.X/site-packages"
           usbLibs = pkgs.lib.makeLibraryPath [ pkgs.libusb1 ];
         in

@@ -17,6 +17,7 @@ import os
 import signal
 import re
 import subprocess
+import sys
 import threading
 import time
 from threading import Event, Lock
@@ -392,6 +393,59 @@ def default_sink_name():
     return _default_sink_name()
 
 
+# ----- friendly display names ------------------------------------------------
+# app_name is the stable MATCH KEY and must never be enriched; display_name is
+# a LABEL for the Add Source picker. Ported from CryoByte33/openwave, which
+# split the two the same way.
+
+_GENERIC_PREFIXES = ("ALSA plug-in", "alsa-playback", "PulseAudio")
+# Engine/toolkit defaults that aren't the real app — Electron apps commonly
+# report "Chromium" even though the binary is the actual app (e.g. "Cider").
+_GENERIC_NAMES = {"chromium", "electron", "unknown"}
+# Binaries that are runtimes/launchers, not the app itself — their name tells
+# us nothing, so for these we fall through to the owning X11 window instead.
+# Doubles as a set of generic *names*: an app reporting
+# application.name="java" is just as unhelpful as the binary "java".
+_RUNTIME_BINARIES = {
+    "java", "electron", "chromium", "chromium-browser", "chrome",
+    "google-chrome", "wine", "wine64", "wine-preloader", "python", "python3",
+    "mono", "node", "nw", "sh", "bash",
+}
+
+
+def _is_generic(app_name, binary):
+    """True when application.name is an unhelpful toolkit/bridge/runtime label
+    rather than the real app — only these get enriched (binary, then X11
+    window).
+
+    An app whose name simply matches its binary (Zen/zen, Discord/discord) is
+    NOT generic: that is the normal, good case. Treating it as generic sent it
+    through the window lookup, where a Flatpak's namespaced PID could collide
+    with another sandbox's window and mislabel it (Zen showed as "Bolt
+    Launcher")."""
+    name = (app_name or "").strip().lower()
+    if not name or name in _GENERIC_NAMES or name in _RUNTIME_BINARIES:
+        return True
+    return any(name.startswith(p.lower()) for p in _GENERIC_PREFIXES)
+
+
+def _binary_name(binary, app_name):
+    """A friendly name from the process binary (e.g. "Cider" behind
+    "Chromium"), or None when the binary is a runtime ("java") or just echoes
+    app_name."""
+    b = (binary or "").strip().rsplit("/", 1)[-1]   # basename if it's a path
+    if not b or b.lower() in _RUNTIME_BINARIES             or b.lower() == (app_name or "").strip().lower():
+        return None
+    return b
+
+
+def _to_int(v):
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return None
+
+
 def list_audio_streams():
     """Return [{id, app_name, media_name, node_name}, ...] for active output streams."""
     import json as _json
@@ -434,7 +488,25 @@ def list_audio_streams():
             "media_name": props.get("media.name", ""),
             "node_name": node_name,
             "binary": props.get("application.process.binary", ""),
+            "_pid": _to_int(props.get("application.process.id")),
         })
+
+    # For generic names, prefer a meaningful binary ("Cider"), else the owning
+    # X11 window ("RuneLite"). X11 is looked up lazily, only when a generic
+    # stream has no usable binary, so the common path never touches Xlib.
+    pids = None
+    for stream in out:
+        pid = stream.pop("_pid")
+        if not _is_generic(stream["app_name"], stream["binary"]):
+            stream["display_name"] = stream["app_name"]
+            continue
+        name = _binary_name(stream["binary"], stream["app_name"])
+        if not name:
+            if pids is None:
+                from . import wmnames
+                pids = wmnames.pid_names()
+            name = pids.get(pid) if pid else None
+        stream["display_name"] = name or stream["app_name"]
     return out
 
 # ----- application matching -------------------------------------------------
@@ -650,10 +722,86 @@ class Mixer:
 
     def _save_state(self):
         os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
+        self._preserve_if_wiping()
         tmp = CONFIG_PATH + ".tmp"
         with open(tmp, "w") as f:
             json.dump(self._state, f, indent=2)
         os.replace(tmp, CONFIG_PATH)
+        self._trace_save()
+
+    def _preserve_if_wiping(self):
+        """Keep a copy of the on-disk state before a save that would gut it.
+
+        Every save rewrites the file whole from this instance's memory, so an
+        instance holding stale or empty state destroys the good copy in one
+        write -- which has happened, twice, and the second time took a
+        rebuilt six-cell matrix with it. Until the writer is caught, a save
+        about to discard most of the cells on disk sets the evidence aside
+        first: the user's matrix survives as mixes.json.pre-wipe and the
+        trace records that it happened. A one-cell difference is someone
+        deleting a row; most-of-them at once is nobody's edit.
+        """
+        try:
+            with open(CONFIG_PATH) as f:
+                on_disk = json.load(f)
+            if not isinstance(on_disk, dict):
+                return
+            disk_cells = {k for k in on_disk if "." in k}
+            mem_cells = {k for k in self._state if "." in k}
+            lost = disk_cells - mem_cells
+            if len(lost) >= 2 and len(lost) > len(disk_cells) // 2:
+                import shutil
+                shutil.copy2(CONFIG_PATH, CONFIG_PATH + ".pre-wipe")
+                self._trace_note(
+                    f"PRE-WIPE PRESERVED: about to drop {sorted(lost)}")
+        except (OSError, ValueError):
+            return
+
+    # Cells have now vanished from this file twice with no code path found
+    # that deletes them: nothing but remove_source and remove_mix removes a
+    # cell, the saves are atomic, the application is single-instance -- and
+    # both wipes left exactly the cells whose loopbacks were live. Every
+    # explanation from reading has run out, so every save records what it
+    # wrote and who asked, and the next wipe names its author instead of
+    # being reconstructed from screenshots. The old machine carried the same
+    # log for the same reason; this time it is part of the program.
+    _TRACE_PATH = CONFIG_PATH.replace("mixes.json", "write-trace.log")
+    _TRACE_LIMIT = 256 * 1024
+
+    def _trace_note(self, text):
+        try:
+            with open(self._TRACE_PATH, "a") as t:
+                t.write(f"{time.strftime('%H:%M:%S')} {text}\n")
+        except Exception:
+            pass
+
+    def _trace_save(self):
+        try:
+            cells = {
+                k: round(float(v.get("volume", 0.0)), 2)
+                for k, v in self._state.items()
+                if "." in k and isinstance(v, dict)
+            }
+            frames = []
+            f = sys._getframe(2)  # skip _trace_save and _save_state
+            for _ in range(6):
+                if f is None:
+                    break
+                frames.append(f"{f.f_code.co_name}:{f.f_lineno}")
+                f = f.f_back
+            stamp = time.strftime("%H:%M:%S")
+            line = (f"{stamp} CELLS   {cells}\n"
+                    f"          {' <- '.join(frames)}\n")
+            try:
+                if os.path.getsize(self._TRACE_PATH) > self._TRACE_LIMIT:
+                    os.replace(self._TRACE_PATH, self._TRACE_PATH + ".1")
+            except OSError:
+                pass
+            with open(self._TRACE_PATH, "a") as t:
+                t.write(line)
+        except Exception:
+            # The trace exists to explain failures, not to cause any.
+            pass
 
     def get_cell(self, source_id, mix_id):
         return self._state.get(
@@ -930,6 +1078,7 @@ class Mixer:
 
     def remove_source(self, source_id):
         """Forget persisted cells now; tear down loopbacks on worker."""
+        self._trace_note(f"remove_source({source_id})")
         with self._lock:
             prefix = f"{source_id}."
             for cell_key in [k for k in self._state if k.startswith(prefix)]:
@@ -949,6 +1098,7 @@ class Mixer:
         the worker needs it to destroy the live node and _mix_sink() would
         already return None by the time the task runs.
         """
+        self._trace_note(f"remove_mix({mix_id})")
         with self._lock:
             sink = self._mix_sink(mix_id)
             # Cell keys are exactly "<source>.<mix>" — split rather than match a
@@ -1014,6 +1164,11 @@ class Mixer:
             self._save_state()
         return True
 
+    @property
+    def volumes_restored(self):
+        """True once the masters have been put back and observing is safe."""
+        return self._volumes_restored
+
     def restore_mix_volumes(self):
         """Put the mix masters back to what they were. Returns True if done.
 
@@ -1029,6 +1184,23 @@ class Mixer:
             # shut, so no observation can run and persist the unity the
             # daemon just created the sinks at.
             return False
+        # Having the definitions is not the same as having the sinks. First
+        # run writes the PipeWire configuration, so the daemon creates them
+        # after OpenWave is already up, and a PipeWire restart reopens the
+        # same gap. Writing into it fails silently -- _run_quiet does not look
+        # at the return code -- so a restore that reached nothing would open
+        # the gate anyway and the next tick would persist the unity the sinks
+        # are about to appear at. Only a sink we actually mean to put a value
+        # back onto can hold the gate shut: one with nothing remembered has
+        # nothing to lose, and waiting on it would mean a first run never
+        # starts observing at all.
+        live = _pactl_sink_volumes()
+        for mix_id, mix in list(self._mixes.items()):
+            sink = mix.get("sink")
+            if not sink or self.mix_volume(mix_id) is None:
+                continue
+            if sink not in live:
+                return False
         for mix_id, mix in list(self._mixes.items()):
             sink = mix.get("sink")
             remembered = self.mix_volume(mix_id)

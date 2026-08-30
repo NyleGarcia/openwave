@@ -23,7 +23,7 @@ from .mixmatrix import MixMatrix
 from .sourcedialog import AddSourceDialog
 from . import (paths, setup, service, sources as sources_module,
                mixes as mixes_module, desktop as desktop_module,
-               recovery as recovery_module)
+               recovery as recovery_module, device as device_module)
 
 logging.basicConfig(level=logging.INFO, format="%(name)s: %(message)s")
 
@@ -65,11 +65,14 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         self._updating_ui = False
         self._last_state = None
         self._poll_id = None
+        self._reconnect_id = None
         self._stream_poll_id = None
         self._device_poll_countdown = self._DEVICE_POLL_EVERY
-        self._gain_timeout = None
-        self._hp_timeout = None
-        self._mix_timeout = None
+        # One pacer for every device slider. 80 ms leading+periodic+trailing,
+        # so the hardware tracks during a drag instead of hearing about it
+        # 200 ms after the drag stops.
+        from .scheduler import GLibScheduler, Throttler
+        self._throttle = Throttler(GLibScheduler(), 0.08)
         # Debounce slider events to coalesce a flurry of value-changed signals
         # during a drag into one set_cell. {(source_id, mix_id): timeout_id}.
         self._cell_debounce_ids = {}
@@ -576,7 +579,30 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         def _fail(e):
             self.status_label.set_label("Disconnected")
             self.status_label.add_css_class("dim-label")
+            self._start_reconnect()
         self._usb_async(_connect, _done, _fail)
+
+    def _start_reconnect(self):
+        """Watch for a Wave appearing, so plugging one in needs no Refresh.
+
+        A 2 s sysfs presence check while disconnected; the moment a supported
+        device is on the bus, hand off to the normal connect path. The tick
+        stops itself once connected and restarts from the failure paths, so
+        it never runs alongside a healthy poll.
+        """
+        if self._reconnect_id:
+            return
+        self._reconnect_id = GLib.timeout_add_seconds(2, self._reconnect_tick)
+
+    def _reconnect_tick(self):
+        if self.dev.connected:
+            self._reconnect_id = None
+            return False
+        if device_module.wave_present():
+            self._reconnect_id = None
+            self._try_connect()
+            return False
+        return True
 
     def _start_polling(self):
         """Start 10 Hz polling to sync hardware state."""
@@ -607,6 +633,8 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         self.status_label.add_css_class("dim-label")
         self.dev.disconnect()
         self._stop_polling()
+        self._notify_tray()
+        self._start_reconnect()
 
     def _apply_profile(self, profile):
         """Adapt the UI to the connected device model."""
@@ -651,12 +679,33 @@ class WaveXLRWindow(Adw.ApplicationWindow):
             self.mix_label.set_label(f"{state['monitor_mix'] / 256:.0f}%")
         # Gain and mute live in the sidebar; no matrix row mirrors them.
         self._updating_ui = False
+        self._notify_tray()
+
+    def capture_rows_muted(self):
+        """True when no capture row is live.
+
+        The other half of being on air. Group hand-over mutes a row and
+        touches no hardware, so with two microphones grouped the one that is
+        not live is muted here and nowhere else. With no capture rows at all
+        there is nothing to be silenced by, which is not the same as muted.
+        """
+        rows = [s for s in self._sources.values() if s.get("node_name")]
+        if not rows:
+            return False
+        return all(s.get("muted", False) for s in rows)
+
+    def _notify_tray(self):
+        app = self.get_application()
+        if app is not None:
+            app.refresh_tray()
 
     def _on_usb_error(self, e):
         self.status_label.set_label("Disconnected")
         self.status_label.add_css_class("dim-label")
         self.dev.disconnect()
         self._stop_polling()
+        self._notify_tray()
+        self._start_reconnect()
 
     def _on_mute_changed(self, row, _pspec):
         if self._updating_ui or not self.dev.connected:
@@ -669,29 +718,20 @@ class WaveXLRWindow(Adw.ApplicationWindow):
             return
         val = int(scale.get_value())
         self.gain_label.set_label(self._format_gain(val))
-        # Debounce — only send after slider stops moving for 200ms
-        if hasattr(self, '_gain_timeout') and self._gain_timeout:
-            GLib.source_remove(self._gain_timeout)
-        self._gain_timeout = GLib.timeout_add(200, self._send_gain, val)
+        self._throttle.push("gain", val, self._send_gain)
 
     def _send_gain(self, val):
-        self._gain_timeout = None
         self._usb_async(lambda: self.dev.set_gain_raw(val), on_error=self._on_usb_error)
-        return False
 
     def _on_hp_changed(self, scale):
         if self._updating_ui or not self.dev.connected:
             return
         db = scale.get_value()
         self.hp_label.set_label(f"{db:.1f} dB")
-        if hasattr(self, '_hp_timeout') and self._hp_timeout:
-            GLib.source_remove(self._hp_timeout)
-        self._hp_timeout = GLib.timeout_add(200, self._send_hp, db)
+        self._throttle.push("hp", db, self._send_hp)
 
     def _send_hp(self, db):
-        self._hp_timeout = None
         self._usb_async(lambda: self.dev.set_hp_volume_db(db), on_error=self._on_usb_error)
-        return False
 
     # ----- per-mix output routing (shown in each column header's menu) -----
     def _output_entries(self, mix_id, sinks, default_sink):
@@ -887,14 +927,10 @@ class WaveXLRWindow(Adw.ApplicationWindow):
             return
         val = int(scale.get_value())
         self.mix_label.set_label(f"{val / 256:.0f}%")
-        if self._mix_timeout:
-            GLib.source_remove(self._mix_timeout)
-        self._mix_timeout = GLib.timeout_add(200, self._send_mix, val)
+        self._throttle.push("mix", val, self._send_mix)
 
     def _send_mix(self, val):
-        self._mix_timeout = None
         self._usb_async(lambda: self.dev.set_monitor_mix(val), on_error=self._on_usb_error)
-        return False
 
     def _on_mic_matrix_volume_changed(self, _source, value):
         if self._updating_ui or not self.dev.connected:
@@ -904,9 +940,7 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         self._updating_ui = True
         self.gain_scale.set_value(raw)
         self._updating_ui = False
-        if self._gain_timeout:
-            GLib.source_remove(self._gain_timeout)
-        self._gain_timeout = GLib.timeout_add(200, self._send_gain, raw)
+        self._throttle.push("gain", raw, self._send_gain)
 
     def _on_mic_matrix_mute_toggled(self, _source, muted):
         if self._updating_ui or not self.dev.connected:
@@ -946,6 +980,12 @@ class WaveXLRWindow(Adw.ApplicationWindow):
 
     def _stream_poll_tick(self):
         self.mixer.poll_streams()
+        if not self.mixer.volumes_restored:
+            # _do_start restores once, and the mix sinks may not have existed
+            # yet when it did -- first run creates them, and a PipeWire
+            # restart recreates them. Retrying here is what reopens the gate;
+            # without it the masters stay at whatever the daemon made them.
+            self.mixer.restore_mix_volumes()
         self.mixer.observe_mix_volumes()
         self._device_poll_countdown -= 1
         check_devices = self._device_poll_countdown <= 0
@@ -1091,10 +1131,26 @@ class WaveXLRWindow(Adw.ApplicationWindow):
             cell.set_level(level)
 
     def _on_add_source_clicked(self, _matrix):
-        dialog = AddSourceDialog(exclude_nodes=self._bound_capture_nodes())
+        dialog = AddSourceDialog(
+            exclude_nodes=self._bound_capture_nodes(),
+            exclude_apps=self._bound_app_names(),
+        )
         dialog.connect("source-confirmed", self._on_source_confirmed)
         dialog.connect("device-source-confirmed", self._on_device_source_confirmed)
         dialog.present(self)
+
+    def _bound_app_names(self):
+        """Application names some row already matches, so the picker cannot
+        offer a duplicate. claim_streams() gives every stream exactly one
+        owner regardless, so a duplicate could never double-route -- but it
+        would sit in the matrix as a silently inert fader, which reads as
+        broken. Built from bindings() so multi-name rows cover all of theirs.
+        """
+        return {
+            name
+            for source in self._sources.values()
+            for name in sources_module.bindings(source)
+        }
 
     def _bound_capture_nodes(self):
         """Capture nodes that already have a row, so the picker cannot make a
@@ -1256,6 +1312,7 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         if not muted:
             self._enforce_exclusive_group(source_id)
         sources_module.save(self._sources)
+        self._notify_tray()
 
     def _on_group_sources_clicked(self, _matrix, dragged_id, target_id):
         """Put the dragged source in the target's group.
@@ -1350,6 +1407,7 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         if not muted:
             self._enforce_exclusive_group(source_id)
         sources_module.save(self._sources)
+        self._notify_tray()
         return muted
 
     def set_cell_volume(self, source_id, mix_id, volume):
@@ -1828,6 +1886,23 @@ class WaveXLRApp(Adw.Application):
         self._tray = tray
         # Keep app alive when window is hidden
         self.hold()
+        self.refresh_tray()
+
+    def refresh_tray(self):
+        """Push what the microphone is really doing to the tray icon.
+
+        Cheap to call from anywhere either mute can move: set_state does
+        nothing at all unless the computed state actually differs.
+        """
+        if not self._tray or not self._window:
+            return
+        window = self._window
+        state = window._last_state or {}
+        self._tray.set_state(
+            bool(window.dev.connected),
+            bool(state.get("mute", False)),
+            window.capture_rows_muted(),
+        )
 
     def _toggle_mute(self):
         if self._window and self._window.dev.connected:

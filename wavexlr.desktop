@@ -2,6 +2,6 @@
 Name=OpenWave
 Comment=Elgato Wave Control for Linux
 Exec=openwave
-Icon=audio-input-microphone
+Icon=openwave
 Type=Application
 Categories=Audio;Settings;

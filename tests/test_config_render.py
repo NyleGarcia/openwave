@@ -43,6 +43,15 @@ class RenderedConfig(unittest.TestCase):
         self.assertEqual(
             self.rendered.count("monitor.channel-volumes = true"), 3)
 
+    def test_every_sink_opts_out_of_wireplumber_restore(self):
+        """WirePlumber's restore-stream tracks these sinks on some setups and
+        re-applies its own last-seen level when one reappears, racing the
+        restore OpenWave does from mixes.json -- observed as a master
+        reverting to a stale value on reboot. The sink must say the property
+        is not WirePlumber's to restore."""
+        self.assertEqual(
+            self.rendered.count("state.restore-props = false"), 3)
+
     def test_it_is_marked_generated(self):
         self.assertIn(setup.GENERATED_MARKER, self.rendered)
 
