@@ -276,6 +276,8 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         self.matrix.connect("remove-source-clicked", self._on_remove_source_clicked)
         self.matrix.connect("edit-source-clicked", self._on_edit_source_clicked)
         self.matrix.connect("move-source-clicked", self._on_move_source_clicked)
+        self.matrix.connect("switch-source-clicked", self._on_switch_source_clicked)
+        self.matrix.connect("group-sources-clicked", self._on_group_sources_clicked)
         self.matrix.connect("add-mix-clicked", self._on_add_mix_clicked)
         self.matrix.connect("rename-mix-clicked", self._on_rename_mix_clicked)
         self.matrix.connect("remove-mix-clicked", self._on_remove_mix_clicked)
@@ -1227,6 +1229,40 @@ class WaveXLRWindow(Adw.ApplicationWindow):
             source_id, self._sources.get(source_id, {}).get("level", 1.0), muted)
         if not muted:
             self._enforce_exclusive_group(source_id)
+        sources_module.save(self._sources)
+
+    def _on_group_sources_clicked(self, _matrix, dragged_id, target_id):
+        """Put the dragged source in the target's group.
+
+        The target names the group: dropping onto a row that has none starts
+        one named after it, so grouping is a single gesture rather than typing
+        the same string into two dialogs and hoping they match.
+        """
+        dragged = self._sources.get(dragged_id)
+        target = self._sources.get(target_id)
+        if dragged is None or target is None:
+            return
+        group = sources_module.group(target) or target.get("name", target_id)
+        self._sources = sources_module.update(self._sources, target_id, group=group)
+        self._sources = sources_module.update(self._sources, dragged_id, group=group)
+        for sid in (target_id, dragged_id):
+            self.matrix.set_source_group(sid, group)
+        # Joining a group means joining its exclusivity: leave only the one
+        # that was already live unmuted.
+        live = target_id if not target.get("muted") else dragged_id
+        self._on_switch_source_clicked(None, live)
+
+    def _on_switch_source_clicked(self, _matrix, source_id):
+        """Make one source the live one in its group, in a single press."""
+        source = self._sources.get(source_id)
+        if source is None:
+            return
+        source["muted"] = False
+        self.mixer.set_source_level(source_id, source.get("level", 1.0), False)
+        cell = self.matrix.source(source_id)
+        if cell is not None:
+            cell.set_muted(False)
+        self._enforce_exclusive_group(source_id)
         sources_module.save(self._sources)
 
     def _enforce_exclusive_group(self, active_id):

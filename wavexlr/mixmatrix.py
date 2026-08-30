@@ -34,6 +34,10 @@ class MixMatrix(Gtk.Box):
         "edit-source-clicked": (GObject.SignalFlags.RUN_FIRST, None, (str,)),
         # (source_id, delta) -- -1 to move a row up, +1 to move it down
         "move-source-clicked": (GObject.SignalFlags.RUN_FIRST, None, (str, int)),
+        # Make this source the live one in its group
+        "switch-source-clicked": (GObject.SignalFlags.RUN_FIRST, None, (str,)),
+        # (dragged_id, target_id) -- put the first in the second's group
+        "group-sources-clicked": (GObject.SignalFlags.RUN_FIRST, None, (str, str)),
         "add-mix-clicked": (GObject.SignalFlags.RUN_FIRST, None, ()),
         "rename-mix-clicked": (GObject.SignalFlags.RUN_FIRST, None, (str,)),
         "remove-mix-clicked": (GObject.SignalFlags.RUN_FIRST, None, (str,)),
@@ -81,21 +85,22 @@ class MixMatrix(Gtk.Box):
         corner.set_size_request(400, 64)
         self._grid.attach(corner, 0, 0, 1, 1)
 
-        # "+ Add Source" / "+ Add Mix" trailing affordances, below the grid.
-        # The mix button sits here rather than in a trailing grid column so
-        # that adding and removing columns never has to renumber it.
+        # "+ Add Source" / "+ Add Mix" sit above the grid, at the top left,
+        # rather than trailing below it: below, they moved down the window as
+        # rows were added and ended up off-screen on a full matrix. Neither is
+        # a grid column, so adding or removing one never renumbers them.
         add_row = Gtk.Box(
             orientation=Gtk.Orientation.HORIZONTAL,
             spacing=6,
-            margin_start=12, margin_end=12, margin_bottom=12,
+            halign=Gtk.Align.START,
+            margin_start=12, margin_end=12, margin_top=12, margin_bottom=2,
         )
-        wrapper.append(add_row)
+        wrapper.prepend(add_row)
         self._add_btn = Gtk.Button(
             label="+ Add Source",
             halign=Gtk.Align.START,
         )
         self._add_btn.add_css_class("openwave-add-source")
-        self._add_btn.set_size_request(400, -1)
         self._add_btn.connect("clicked", lambda _: self.emit("add-source-clicked"))
         add_row.append(self._add_btn)
 
@@ -104,7 +109,6 @@ class MixMatrix(Gtk.Box):
             halign=Gtk.Align.START,
         )
         self._add_mix_btn.add_css_class("openwave-add-mix")
-        self._add_mix_btn.set_size_request(220, -1)
         self._add_mix_btn.connect("clicked", lambda _: self.emit("add-mix-clicked"))
         add_row.append(self._add_mix_btn)
 
@@ -205,6 +209,10 @@ class MixMatrix(Gtk.Box):
         if reorderable:
             self._make_row_draggable(source, source_id)
         source.connect(
+            "switch-clicked",
+            lambda _s, sid=source_id: self.emit("switch-source-clicked", sid),
+        )
+        source.connect(
             "move-clicked",
             lambda _s, delta, sid=source_id: self.emit("move-source-clicked", sid, delta),
         )
@@ -255,18 +263,45 @@ class MixMatrix(Gtk.Box):
 
         drop = Gtk.DropTarget.new(GObject.TYPE_STRING, Gdk.DragAction.MOVE)
         drop.connect("drop", self._on_row_drop, source_id)
-        drop.connect("enter", lambda _t, _x, _y, w=cell:
-                     (w.add_css_class("openwave-drop-target"), Gdk.DragAction.MOVE)[1])
-        drop.connect("leave", lambda _t, w=cell: w.remove_css_class("openwave-drop-target"))
+        drop.connect("motion", self._on_row_motion, source_id)
+        drop.connect("leave", lambda _t, w=cell: self._clear_drop_hint(w))
         cell.add_controller(drop)
 
-    def _on_row_drop(self, _target, value, _x, _y, target_id):
-        dragged = str(value)
+    # Fraction of a row's height at each end that means "move here" rather
+    # than "group with this". The middle is the larger target because grouping
+    # is the deliberate act; reordering is the one you can repeat cheaply.
+    _EDGE_ZONE = 0.28
+
+    def _drop_is_grouping(self, cell, y):
+        height = cell.get_height() or 64
+        return self._EDGE_ZONE * height <= y <= (1 - self._EDGE_ZONE) * height
+
+    def _on_row_motion(self, target, _x, y, target_id):
+        """Show which of the two outcomes a release would produce."""
         cell = self._sources.get(target_id)
+        if cell is None:
+            return Gdk.DragAction.MOVE
+        grouping = self._drop_is_grouping(cell, y)
+        cell.remove_css_class("openwave-drop-target")
+        cell.remove_css_class("openwave-drop-group")
+        cell.add_css_class(
+            "openwave-drop-group" if grouping else "openwave-drop-target")
+        return Gdk.DragAction.MOVE
+
+    def _clear_drop_hint(self, cell):
         if cell is not None:
             cell.remove_css_class("openwave-drop-target")
+            cell.remove_css_class("openwave-drop-group")
+
+    def _on_row_drop(self, _target, value, _x, y, target_id):
+        dragged = str(value)
+        cell = self._sources.get(target_id)
+        self._clear_drop_hint(cell)
         if dragged == target_id or dragged not in self._source_ids:
             return False
+        if cell is not None and self._drop_is_grouping(cell, y):
+            self.emit("group-sources-clicked", dragged, target_id)
+            return True
         delta = self._source_ids.index(target_id) - self._source_ids.index(dragged)
         self.emit("move-source-clicked", dragged, delta)
         return True
@@ -635,6 +670,8 @@ class SourceCell(Gtk.Box):
         "remove-clicked": (GObject.SignalFlags.RUN_FIRST, None, ()),
         # (delta) -- -1 to move this row up, +1 to move it down
         "move-clicked": (GObject.SignalFlags.RUN_FIRST, None, (int,)),
+        # Make this the live source in its group
+        "switch-clicked": (GObject.SignalFlags.RUN_FIRST, None, ()),
         "edit-clicked": (GObject.SignalFlags.RUN_FIRST, None, ()),
     }
 
@@ -710,6 +747,20 @@ class SourceCell(Gtk.Box):
         self._mute_btn = Gtk.ToggleButton(valign=Gtk.Align.CENTER)
         self._mute_btn.add_css_class("flat")
         self._mute_btn.add_css_class("circular")
+        # Shown only on a grouped row: one press makes this the live source
+        # and silences its group-mates, rather than unmuting one and
+        # remembering to mute the other.
+        self._switch_btn = Gtk.Button(
+            valign=Gtk.Align.CENTER, visible=False,
+            tooltip_text="Switch to this source",
+        )
+        self._switch_btn.add_css_class("flat")
+        self._switch_btn.add_css_class("circular")
+        self._switch_icon = Gtk.Image.new_from_icon_name("radio-symbolic")
+        self._switch_btn.set_child(self._switch_icon)
+        self._switch_btn.connect("clicked", lambda _b: self.emit("switch-clicked"))
+        inner.append(self._switch_btn)
+
         self._mute_icon = Gtk.Image.new_from_icon_name(
             "audio-input-microphone-symbolic" if is_capture
             else "audio-volume-high-symbolic"
@@ -776,6 +827,7 @@ class SourceCell(Gtk.Box):
     def set_group(self, group):
         """Show which exclusivity group this row is in, if any."""
         group = (group or "").strip()
+        self._switch_btn.set_visible(bool(group))
         self._group_lbl.set_label(f"\u2b24 {group}" if group else "")
         self._group_lbl.set_visible(bool(group))
         self._group_lbl.set_tooltip_text(
@@ -856,6 +908,14 @@ class SourceCell(Gtk.Box):
                     else "audio-volume-high-symbolic")
         self._mute_icon.set_from_icon_name(icon)
         self._mute_btn.set_tooltip_text("Unmute" if muted else "Mute")
+        if getattr(self, "_switch_icon", None) is not None:
+            self._switch_icon.set_from_icon_name(
+                "radio-symbolic" if muted else "radio-checked-symbolic"
+            )
+            self._switch_btn.set_sensitive(muted)
+            self._switch_btn.set_tooltip_text(
+                "Switch to this source" if muted else "This source is live"
+            )
         # A muted row should be obvious at a glance down the column, not a
         # difference of one small icon.
         for widget in (self, self._name_lbl, self._mute_icon):
