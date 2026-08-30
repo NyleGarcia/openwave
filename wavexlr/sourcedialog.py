@@ -50,7 +50,7 @@ class AddSourceDialog(Adw.Dialog):
         "source-edited": (GObject.SignalFlags.RUN_FIRST, None, (str, str, str, str, str)),
     }
 
-    def __init__(self, source=None, *, exclude_nodes=()):
+    def __init__(self, source=None, *, exclude_nodes=(), exclude_apps=()):
         super().__init__()
         self._source = source
         self._editing_device = (
@@ -66,6 +66,9 @@ class AddSourceDialog(Adw.Dialog):
 
         # Capture nodes that already have a matrix row.
         self._exclude_nodes = frozenset(exclude_nodes)
+        # Compared case-insensitively, the same way stream matching does:
+        # a row bound to "spotify" already covers the app reporting "Spotify".
+        self._exclude_apps = frozenset(a.casefold() for a in exclude_apps)
         # None = nothing picked yet, "" = manual entry, else the picked app.
         # Every binding, comma-separated: a source can gather more than one
         # application, and an edit that showed only the first would silently
@@ -310,10 +313,14 @@ class AddSourceDialog(Adw.Dialog):
         streams = list_audio_streams()
         apps = {}
         for s in streams:
+            if s["app_name"].casefold() in self._exclude_apps:
+                continue
             apps.setdefault(s["app_name"], []).append(s)
 
         if not apps:
-            empty = Adw.ActionRow(title="No audio streams playing")
+            title = ("No new apps playing audio" if self._exclude_apps
+                     else "No audio streams playing")
+            empty = Adw.ActionRow(title=title)
             empty.set_subtitle("Start playback in an app, or enter a name manually below")
             empty.set_sensitive(False)
             self._listbox.append(empty)

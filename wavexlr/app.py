@@ -1105,10 +1105,26 @@ class WaveXLRWindow(Adw.ApplicationWindow):
             cell.set_level(level)
 
     def _on_add_source_clicked(self, _matrix):
-        dialog = AddSourceDialog(exclude_nodes=self._bound_capture_nodes())
+        dialog = AddSourceDialog(
+            exclude_nodes=self._bound_capture_nodes(),
+            exclude_apps=self._bound_app_names(),
+        )
         dialog.connect("source-confirmed", self._on_source_confirmed)
         dialog.connect("device-source-confirmed", self._on_device_source_confirmed)
         dialog.present(self)
+
+    def _bound_app_names(self):
+        """Application names some row already matches, so the picker cannot
+        offer a duplicate. claim_streams() gives every stream exactly one
+        owner regardless, so a duplicate could never double-route -- but it
+        would sit in the matrix as a silently inert fader, which reads as
+        broken. Built from bindings() so multi-name rows cover all of theirs.
+        """
+        return {
+            name
+            for source in self._sources.values()
+            for name in sources_module.bindings(source)
+        }
 
     def _bound_capture_nodes(self):
         """Capture nodes that already have a row, so the picker cannot make a
