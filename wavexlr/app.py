@@ -1205,16 +1205,40 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         self._on_switch_source_clicked(None, live)
 
     def _on_switch_source_clicked(self, _matrix, source_id):
-        """Make one source the live one in its group, in a single press."""
+        """Hand the group over, in one press.
+
+        On a muted row this makes that row live. On the row that is ALREADY
+        live it hands over to the next source in the group, so the button
+        swaps between two microphones from either end -- which is what two
+        opposing arrows promise, and what a control that did nothing on the
+        live row failed to deliver.
+        """
         source = self._sources.get(source_id)
         if source is None:
             return
-        source["muted"] = False
-        self.mixer.set_source_level(source_id, source.get("level", 1.0), False)
-        cell = self.matrix.source(source_id)
+
+        target_id = source_id
+        if not source.get("muted"):
+            group = sources_module.group(source)
+            members = [
+                sid for sid, other in self._sources.items()
+                if sources_module.group(other) == group
+            ] if group else []
+            if len(members) > 1:
+                nxt = (members.index(source_id) + 1) % len(members)
+                target_id = members[nxt]
+            else:
+                return          # nothing to hand over to
+
+        target = self._sources.get(target_id)
+        if target is None:
+            return
+        target["muted"] = False
+        self.mixer.set_source_level(target_id, target.get("level", 1.0), False)
+        cell = self.matrix.source(target_id)
         if cell is not None:
             cell.set_muted(False)
-        self._enforce_exclusive_group(source_id)
+        self._enforce_exclusive_group(target_id)
         sources_module.save(self._sources)
 
     def _enforce_exclusive_group(self, active_id):
