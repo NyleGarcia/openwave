@@ -572,6 +572,9 @@ class WaveXLRWindow(Adw.ApplicationWindow):
                 pass
             return {"state": self.dev.get_all(), "info": info}
         def _done(result):
+            # A Wave that appeared after the mixer was built: mic/hp were
+            # resolved to None then, and only a re-detect corrects them.
+            self.mixer.redetect_device()
             self._apply_profile(self.dev.profile)
             self._apply_state(result["state"])
             info = result["info"]

@@ -56,6 +56,10 @@ def bare_mixer(**attrs):
     mx.hp = None
     mx._started = False
     mx._volumes_restored = True
+    # The default seam delegates to the module-level functions at call time,
+    # so a test that patches mixer_mod._pactl_set_sink_volume still
+    # intercepts. Pass _pw=FakePipeWire() instead to assert on graph calls.
+    mx._pw = mixer_mod.SubprocessPipeWire()
     # set_cell and friends enqueue their reconcile even with no worker
     # running. The queue is the seam: work lands in _pending and stays there,
     # so a test can call the real entry points and inspect the state they
@@ -66,3 +70,105 @@ def bare_mixer(**attrs):
     for key, value in attrs.items():
         setattr(mx, key, value)
     return mx
+
+
+class FakeProc:
+    """A loopback process that never was: records its lifecycle."""
+
+    def __init__(self, argv):
+        self.argv = argv
+        self.terminated = False
+        self.killed = False
+        self._returncode = None
+
+    def poll(self):
+        return self._returncode
+
+    def wait(self, timeout=None):
+        return self._returncode if self._returncode is not None else 0
+
+    def terminate(self):
+        self.terminated = True
+        self._returncode = 0
+
+    def kill(self):
+        self.killed = True
+        self._returncode = -9
+
+    def dies(self):
+        """Simulate an out-of-band death, PipeWire restarting under it."""
+        self._returncode = 1
+
+
+class FakePipeWire:
+    """A PipeWire graph made of dicts, recording every call in order.
+
+    Configure what exists (node ids, ports, streams, sink volumes); read
+    back `calls` to assert what the mixer decided to do about it. Nothing
+    here spawns a process or needs a sound card.
+    """
+
+    def __init__(self):
+        self.calls = []
+        self.node_ids = {}       # node_name -> id
+        self.port_map = {}       # (flag, node_name) -> [ports]
+        self.streams = []
+        self.volumes = {}        # sink_name -> (volume, muted)
+        self.default = "default_sink"
+        self.spawned = []        # FakeProc, in spawn order
+        self.spawn_fails = False
+
+    def short_list(self, kind):
+        self.calls.append(("short_list", kind))
+        return []
+
+    def sink_volumes(self):
+        self.calls.append(("sink_volumes",))
+        return dict(self.volumes)
+
+    def set_sink_volume(self, name, volume):
+        self.calls.append(("set_sink_volume", name, round(volume, 3)))
+
+    def set_sink_mute(self, name, muted):
+        self.calls.append(("set_sink_mute", name, muted))
+
+    def move_stream(self, serial, sink_name):
+        self.calls.append(("move_stream", serial, sink_name))
+
+    def node_id(self, name, retries=20):
+        self.calls.append(("node_id", name))
+        return self.node_ids.get(name)
+
+    def wpctl(self, *args):
+        self.calls.append(("wpctl",) + args)
+
+    def ports(self, direction_flag, node_name):
+        return self.port_map.get((direction_flag, node_name), [])
+
+    def link(self, src_port, dst_port):
+        self.calls.append(("link", src_port, dst_port))
+        return True
+
+    def audio_streams(self):
+        return list(self.streams)
+
+    def default_sink(self):
+        return self.default
+
+    def set_default_sink(self, name):
+        self.calls.append(("set_default_sink", name))
+
+    def spawn_loopback(self, argv, detach):
+        self.calls.append(("spawn", argv, detach))
+        if self.spawn_fails:
+            return None
+        proc = FakeProc(argv)
+        self.spawned.append(proc)
+        return proc
+
+    def sweep_stale_loopbacks(self):
+        self.calls.append(("sweep",))
+
+    def find_wave(self):
+        self.calls.append(("find_wave",))
+        return (None, None)
