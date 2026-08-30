@@ -64,6 +64,15 @@ class RoutingWithoutAWave(unittest.TestCase):
 
     ARCTIS = "alsa_input.usb-SteelSeries_Arctis_Nova_Pro_Wireless-00.mono-fallback"
 
+    def setUp(self):
+        # set_cell persists synchronously; without this it persisted to the
+        # real user configuration, and the first save wiped it.
+        self._ctx = temp_config()
+        self._ctx.__enter__()
+
+    def tearDown(self):
+        self._ctx.__exit__(None, None, None)
+
     def _mixer(self):
         mx = bare_mixer()
         mx._sources = {
