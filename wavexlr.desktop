@@ -1,6 +1,6 @@
 [Desktop Entry]
 Name=OpenWave
-Comment=Elgato Wave Control for Linux
+Comment=The audio mixing matrix for Linux
 Exec=openwave
 Icon=openwave
 Type=Application

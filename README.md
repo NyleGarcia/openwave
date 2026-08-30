@@ -1,6 +1,6 @@
 # OpenWave
 
-Linux control application for **Elgato Wave** audio devices — the **Wave XLR** microphone interface and the **Wave:3** microphone. A reverse-engineered replacement for Elgato Wave Link, built with GTK4 + Adwaita.
+**The audio mixing matrix for Linux.** Per-app mixes with per-mix outputs, plus native control of **Elgato Wave** hardware — the **Wave XLR** interface (original and MK.2/XLR Dock) and the **Wave:3** microphone. A reverse-engineered replacement for Elgato Wave Link, built with GTK4 + Adwaita.
 
 ![OpenWave](docs/screenshot.png)
 

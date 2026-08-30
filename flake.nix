@@ -1,5 +1,5 @@
 {
-  description = "OpenWave - Linux control app for the Elgato Wave XLR";
+  description = "OpenWave - The audio mixing matrix for Linux";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
@@ -87,7 +87,7 @@
             '';
 
             meta = {
-              description = "Linux control application for the Elgato Wave XLR interface";
+              description = "The audio mixing matrix for Linux — per-app mixes, per-mix outputs, Elgato Wave control";
               homepage = "https://github.com/rikkichy/openwave";
               license = pkgs.lib.licenses.mit;
               mainProgram = "openwave";

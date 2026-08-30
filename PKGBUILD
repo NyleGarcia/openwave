@@ -2,7 +2,7 @@
 pkgname=openwave
 pkgver=1.0.0
 pkgrel=1
-pkgdesc="Linux control application for the Elgato Wave XLR and Wave:3"
+pkgdesc="The audio mixing matrix for Linux — per-app mixes, per-mix outputs, Elgato Wave control"
 arch=('any')
 url="https://github.com/rikkichy/openwave"
 license=('MIT')

@@ -191,9 +191,13 @@ class WaveXLRWindow(Adw.ApplicationWindow):
 
         # Header bar
         header = Adw.HeaderBar()
-        self.status_label = Gtk.Label(label="Disconnected")
-        self.status_label.add_css_class("dim-label")
-        header.set_title_widget(self.status_label)
+        # The application's name is the title; the device and the connection
+        # state are the subtitle. The device model used to BE the title
+        # ("OpenWave — Wave XLR MK.2"), which read as the app being called
+        # that -- and the header is not where hardware identification lives.
+        self._window_title = Adw.WindowTitle(
+            title="OpenWave", subtitle="Disconnected")
+        header.set_title_widget(self._window_title)
 
         # Audio-service status. Packed at the start and hidden while healthy,
         # so it costs nothing until it has something to say -- it used to be a
@@ -557,7 +561,7 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         threading.Thread(target=_worker, daemon=True).start()
 
     def _try_connect(self):
-        self.status_label.set_label("Connecting...")
+        self._window_title.set_subtitle("Connecting…")
         def _connect():
             self.dev.disconnect()
             self.dev.connect()
@@ -569,7 +573,6 @@ class WaveXLRWindow(Adw.ApplicationWindow):
             return {"state": self.dev.get_all(), "info": info}
         def _done(result):
             self._apply_profile(self.dev.profile)
-            self.status_label.remove_css_class("dim-label")
             self._apply_state(result["state"])
             info = result["info"]
             self.fw_label.set_label(info.get("fw_version", "—"))
@@ -577,8 +580,7 @@ class WaveXLRWindow(Adw.ApplicationWindow):
             self.serial_label.set_label(info.get("serial", "—"))
             self._start_polling()
         def _fail(e):
-            self.status_label.set_label("Disconnected")
-            self.status_label.add_css_class("dim-label")
+            self._window_title.set_subtitle("Disconnected")
             self._start_reconnect()
         self._usb_async(_connect, _done, _fail)
 
@@ -629,8 +631,7 @@ class WaveXLRWindow(Adw.ApplicationWindow):
             self._apply_state(state)
 
     def _on_poll_error(self, e):
-        self.status_label.set_label("Disconnected")
-        self.status_label.add_css_class("dim-label")
+        self._window_title.set_subtitle("Disconnected")
         self.dev.disconnect()
         self._stop_polling()
         self._notify_tray()
@@ -651,7 +652,7 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         # Elgato devices connected the profile that opened over USB and the
         # capture node this row carries can be different hardware, and a row
         # labelled after the wrong one is worse than a generic label.
-        self.status_label.set_label(f"OpenWave — {profile.display_name}")
+        self._window_title.set_subtitle(profile.display_name)
 
     def _format_gain(self, raw):
         scale = self.dev.profile.gain_scale if self.dev.profile else None
@@ -700,8 +701,7 @@ class WaveXLRWindow(Adw.ApplicationWindow):
             app.refresh_tray()
 
     def _on_usb_error(self, e):
-        self.status_label.set_label("Disconnected")
-        self.status_label.add_css_class("dim-label")
+        self._window_title.set_subtitle("Disconnected")
         self.dev.disconnect()
         self._stop_polling()
         self._notify_tray()
