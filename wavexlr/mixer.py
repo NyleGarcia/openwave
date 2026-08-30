@@ -1469,8 +1469,35 @@ class Mixer:
         """
         added, removed = self._refresh_live_captures()
         if added or removed:
-            self._enqueue(("poll",), self._reconcile_all)
+            self._enqueue(
+                ("poll",),
+                lambda nodes=frozenset(added): self._on_captures_moved(nodes))
         return added, removed
+
+    def _on_captures_moved(self, added):
+        self._drop_device_cell_loopbacks(added)
+        self._reconcile_all()
+
+    def _drop_device_cell_loopbacks(self, nodes):
+        """Tear down the cell loopbacks of capture nodes that REAPPEARED.
+
+        A node that comes back — a replug, a recovery card-cycle — is a new
+        node wearing the old name. Its cell loopbacks were spawned with
+        autoconnect off and hand-linked to the corpse, so the process being
+        alive is precisely the failure: it runs, it is healthy, and it
+        carries nothing, which reads as "my microphone stopped working" with
+        no visible cause. Killing them here lets the reconcile that follows
+        respawn and relink against the reincarnation.
+        """
+        if not nodes:
+            return
+        with self._lock:
+            sids = [sid for sid, source in self._sources.items()
+                    if source.get("node_name") in nodes]
+            mix_ids = list(self._mixes)
+        for sid in sids:
+            for mid in mix_ids:
+                self._destroy_loopback((sid, mid))
 
     def request_capture_poll(self):
         """Re-snapshot capture devices on the worker, reconciling if it moved.
@@ -1485,7 +1512,7 @@ class Mixer:
     def _do_poll_capture_devices(self):
         added, removed = self._refresh_live_captures()
         if added or removed:
-            self._reconcile_all()
+            self._on_captures_moved(frozenset(added))
 
     def capture_device_present(self, node_name):
         """True if `node_name` is a capture device PipeWire currently has.

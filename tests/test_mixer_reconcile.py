@@ -61,6 +61,27 @@ class CaptureCells(Base):
         self.mx._reconcile_capture_cell("dock", "personal", ARCTIS, 0.8, False)
         self.assertIn(("wpctl", "set-volume", "77", "0.400"), self.pw.calls)
 
+    def test_a_reappeared_device_gets_fresh_loopbacks(self):
+        """A replug (or a recovery card-cycle) is a new node wearing the old
+        name. The old loopback was hand-linked to the corpse — alive,
+        healthy, and carrying nothing — so the arrival of the node must kill
+        it and let the reconcile respawn against the reincarnation."""
+        self.mx._reconcile_capture_cell("dock", "personal", ARCTIS, 0.8, False)
+        first = self.pw.spawned[0]
+
+        self.mx._drop_device_cell_loopbacks(frozenset({ARCTIS}))
+        self.assertTrue(first.terminated,
+                        "the orphaned loopback must not survive the replug")
+        self.mx._reconcile_capture_cell("dock", "personal", ARCTIS, 0.8, False)
+        self.assertEqual(len(self.pw.spawned), 2,
+                         "the reconcile must respawn a fresh loopback")
+
+    def test_other_devices_loopbacks_are_left_alone(self):
+        self.mx._reconcile_capture_cell("dock", "personal", ARCTIS, 0.8, False)
+        first = self.pw.spawned[0]
+        self.mx._drop_device_cell_loopbacks(frozenset({"some_other_node"}))
+        self.assertFalse(first.terminated)
+
     def test_a_muted_source_silences_the_cell_without_tearing_it_down(self):
         self.mx._sources["dock"]["muted"] = True
         self.pw.node_ids[self.loop_name()] = "77"
