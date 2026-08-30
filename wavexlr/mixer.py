@@ -1003,6 +1003,22 @@ class Mixer:
         self._started = True
         self._reconcile_all()
 
+    def _pin_unity(self, node_name):
+        """Force a plumbing node to unity gain, unmuted.
+
+        These loopbacks carry a mix to hardware or publish it as a source;
+        neither is a user control, and the mix's own volume is what people
+        reach for. But WirePlumber remembers a volume per node NAME and
+        restores it whenever the node reappears, so a stray zero -- set by
+        hand, or by anything walking the graph -- silences that path on every
+        launch afterwards, with the routing looking perfectly correct.
+        """
+        node_id = _node_id_by_name(node_name)
+        if node_id is None:
+            return
+        _wpctl("set-volume", node_id, "1.0")
+        _wpctl("set-mute", node_id, "0")
+
     def _respawn_output_loopback(self, mix_id, sinks=None, default_sink=None):
         """(Re)create one mix's output loopback for its current target."""
         key = ("output", mix_id)
@@ -1014,10 +1030,12 @@ class Mixer:
         if target is None:
             return
         mix_name = (self._mixes.get(mix_id) or {}).get("name", mix_id)
+        node_name = f"openwave_loop_out_{mix_id}"
         self._spawn_loopback(
-            key, mix_sink, target, f"openwave_loop_out_{mix_id}", detach=True,
+            key, mix_sink, target, node_name, detach=True,
             description=f"{mix_name} \u2192 output",
         )
+        self._pin_unity(node_name)
 
     def _mix_source_node(self, sink):
         """<sink>_source -- the name the hand-written config used, so an
@@ -1085,6 +1103,7 @@ class Mixer:
                         f'node.description="OpenWave {mix.get("name", mix_id)}" '
                     ),
                 )
+                self._pin_unity(node_name)
             else:
                 # Already running: re-assert the link in case its sink was
                 # replaced underneath it. pw-link is harmless when the link
