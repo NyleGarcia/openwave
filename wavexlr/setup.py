@@ -7,11 +7,16 @@ import tempfile
 import threading
 
 from . import paths, service
+from .profiles import PROFILES
 
-UDEV_RULES = (
-    'SUBSYSTEM=="usb", ATTR{idVendor}=="0fd9", ATTR{idProduct}=="007d", MODE="0666"',  # Wave XLR
-    'SUBSYSTEM=="usb", ATTR{idVendor}=="0fd9", ATTR{idProduct}=="00a6", MODE="0666"',  # Wave XLR MK.2
-    'SUBSYSTEM=="usb", ATTR{idVendor}=="0fd9", ATTR{idProduct}=="0070", MODE="0666"',  # Wave:3
+# One rule per supported device, derived from PROFILES so a new profile can
+# never be missing here — or in udev_installed() below, which once hardcoded
+# a subset and made first-run setup re-prompt forever on the devices it
+# skipped (0070 originally, then 00a6; flake.nix documents the first).
+UDEV_RULES = tuple(
+    'SUBSYSTEM=="usb", ATTR{idVendor}=="%04x", ATTR{idProduct}=="%04x", '
+    'MODE="0666"' % (p.vid, p.pid)
+    for p in PROFILES
 )
 UDEV_PATH = "/etc/udev/rules.d/99-openwave.rules"
 UDEV_PATH_OLD = "/etc/udev/rules.d/99-wavexlr.rules"
@@ -40,7 +45,7 @@ def udev_installed():
         try:
             with open(path) as f:
                 content = f.read()
-            if all(pid in content for pid in ("007d", "0070")):
+            if all(f"{p.pid:04x}" in content for p in PROFILES):
                 return True
         except (FileNotFoundError, PermissionError):
             continue

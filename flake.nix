@@ -48,18 +48,17 @@
             # and the in-app permission check passes out of the box.
             #
             # Generated from setup.py's UDEV_RULES rather than restated, because
-            # udev_installed() requires *every* product ID to be present. This
-            # was hardcoded to 007d alone while UDEV_RULES also carries 0070
-            # (Wave:3), so the check failed permanently: run_setup() called
-            # install_udev() on every launch, pkexec-wrote the same file the
-            # package already owns, and returned early on failure -- meaning the
-            # WirePlumber and mix-sink configs after it never got installed
-            # either. On NixOS that pkexec cannot succeed regardless, since
-            # /etc/udev/rules.d/99-openwave.rules is a read-only store symlink.
+            # udev_installed() requires *every* product ID to be present, and
+            # both it and the rules now derive from profiles.PROFILES — a new
+            # device cannot be missing from either. (The old literal_eval AST
+            # extraction is gone: UDEV_RULES is computed, so it is imported.)
+            # On NixOS the in-app pkexec cannot write the rule regardless,
+            # since /etc/udev/rules.d/99-openwave.rules would be a read-only
+            # store symlink — consume this via services.udev.packages instead.
             postInstall = ''
               mkdir -p $out/lib/udev/rules.d
-              ${pythonEnv}/bin/python3 -c 'import ast,sys; t=ast.parse(open(sys.argv[1]).read()); v=next(n.value for n in t.body if isinstance(n,ast.Assign) and any(getattr(x,"id",None)=="UDEV_RULES" for x in n.targets)); sys.stdout.write("\n".join(ast.literal_eval(v))+"\n")' \
-                "$out/${sitePkgs}/wavexlr/setup.py" \
+              PYTHONPATH=$out/${sitePkgs} ${pythonEnv}/bin/python3 -c \
+                'from wavexlr.setup import UDEV_RULES; print("\n".join(UDEV_RULES))' \
                 > $out/lib/udev/rules.d/99-openwave.rules
 
               # setup.py looks for the WirePlumber and mix-sink configs next to
