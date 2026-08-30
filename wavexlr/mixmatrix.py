@@ -13,6 +13,8 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Gtk, Adw, GObject, Gdk, Pango  # noqa: E402
 
+from . import icons
+
 
 def _percent_label():
     """A fixed-width percentage readout for a 0..1 slider.
@@ -417,7 +419,7 @@ class MixHeaderCell(Gtk.Box):
         )
         self.append(inner)
 
-        self._icon = Gtk.Image.new_from_icon_name(icon_name)
+        self._icon = Gtk.Image.new_from_icon_name(icons.resolve(icon_name))
         self._icon.set_pixel_size(22)
         inner.append(self._icon)
 
@@ -485,7 +487,7 @@ class MixHeaderCell(Gtk.Box):
         btn = Gtk.Button(hexpand=True)
         btn.add_css_class("flat")
         row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
-        row.append(Gtk.Image.new_from_icon_name(icon_name))
+        row.append(Gtk.Image.new_from_icon_name(icons.resolve(icon_name)))
         lbl = Gtk.Label(label=label, xalign=0, hexpand=True)
         if label_css:
             lbl.add_css_class(label_css)
@@ -582,7 +584,7 @@ class MixHeaderCell(Gtk.Box):
         self._subtitle_lbl.set_visible(bool(subtitle))
 
     def set_icon(self, icon_name):
-        self._icon.set_from_icon_name(icon_name)
+        self._icon.set_from_icon_name(icons.resolve(icon_name))
 
     def set_empty(self, empty):
         """Mark the column as carrying nothing.
@@ -702,13 +704,14 @@ class SourceCell(Gtk.Box):
         self.append(inner)
 
         if reorderable:
-            handle = Gtk.Image.new_from_icon_name("list-drag-handle-symbolic")
+            handle = Gtk.Image.new_from_icon_name(
+                icons.resolve("list-drag-handle-symbolic"))
             handle.set_pixel_size(14)
             handle.add_css_class("dim-label")
             handle.set_tooltip_text("Drag to reorder")
             inner.append(handle)
 
-        self._icon = Gtk.Image.new_from_icon_name(icon_name)
+        self._icon = Gtk.Image.new_from_icon_name(icons.resolve(icon_name))
         self._icon.set_pixel_size(26)
         inner.append(self._icon)
 
@@ -846,7 +849,7 @@ class SourceCell(Gtk.Box):
         self._name_lbl.set_tooltip_text(name)
 
     def set_icon(self, icon_name):
-        self._icon.set_from_icon_name(icon_name)
+        self._icon.set_from_icon_name(icons.resolve(icon_name))
     def set_available(self, available, *, reason="Device not connected"):
         """Dim the row when the device behind it is gone.
 

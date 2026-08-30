@@ -11,6 +11,7 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Gtk, Adw, GObject, Pango  # noqa: E402
 
+from . import icons
 from .mixes import DEFAULT_ICON
 
 ICON_CHOICES = (
@@ -129,7 +130,7 @@ class MixDialog(Adw.Dialog):
 
         preselect = None
         for icon, tooltip in choices:
-            img = Gtk.Image.new_from_icon_name(icon)
+            img = Gtk.Image.new_from_icon_name(icons.resolve(icon))
             img.set_pixel_size(28)
             child = Gtk.FlowBoxChild()
             child.set_child(img)
