@@ -20,7 +20,8 @@ from .mixer import (
 from .mixdialog import MixDialog
 from .mixmatrix import MixMatrix
 from .sourcedialog import AddSourceDialog
-from . import paths, setup, service, sources as sources_module, mixes as mixes_module
+from . import (paths, setup, service, sources as sources_module,
+               mixes as mixes_module, desktop as desktop_module)
 
 logging.basicConfig(level=logging.INFO, format="%(name)s: %(message)s")
 
@@ -406,6 +407,30 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         # Output routing is per mix and lives in each mix column's header
         # menu, not here — one device combo could only ever speak for one mix.
 
+        # --- Startup ---
+        startup_group = Adw.PreferencesGroup(title="Startup")
+        parent.append(startup_group)
+
+        enabled, hidden = desktop_module.autostart_state()
+        self.autostart_row = Adw.SwitchRow(
+            title="Start at login",
+            subtitle="Keeps mixes routed before you open anything",
+        )
+        self.autostart_row.set_active(enabled)
+        self._autostart_handler = self.autostart_row.connect(
+            "notify::active", self._on_autostart_toggled)
+        startup_group.add(self.autostart_row)
+
+        self.tray_row = Adw.SwitchRow(
+            title="Start in the tray",
+            subtitle="No window on login; open it from the tray icon",
+        )
+        self.tray_row.set_active(hidden)
+        # Only meaningful when something is starting it for you.
+        self.tray_row.set_sensitive(enabled)
+        self.tray_row.connect("notify::active", self._on_start_hidden_toggled)
+        startup_group.add(self.tray_row)
+
         # --- Device info ---
         # Titleless group so the expander reads as a single collapsed line: it
         # is reference material, looked at once, and does not deserve a
@@ -433,6 +458,20 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         self.serial_label.add_css_class("dim-label")
         self.serial_row.add_suffix(self.serial_label)
         info_expander.add_row(self.serial_row)
+
+    def _on_autostart_toggled(self, row, _param):
+        enabled, _hidden = desktop_module.set_autostart(
+            row.get_active(), self.tray_row.get_active())
+        self.tray_row.set_sensitive(enabled)
+        if enabled != row.get_active():
+            # The file could not be written; show what is actually true
+            # rather than a switch that lies about the next login.
+            with GObject.signal_handler_block(row, self._autostart_handler):
+                row.set_active(enabled)
+
+    def _on_start_hidden_toggled(self, row, _param):
+        if self.autostart_row.get_active():
+            desktop_module.set_autostart(True, row.get_active())
 
     def _refresh_mix_emptiness(self):
         """Mark every mix that no source currently feeds."""
@@ -1676,6 +1715,7 @@ class WaveXLRApp(Adw.Application):
             if setup.needs_setup():
                 self._show_setup_dialog()
                 return
+            desktop_module.ensure_menu_entry()
             self._window = WaveXLRWindow(application=self)
             # Hide-to-tray on close instead of quitting
             self._window.connect("close-request", self._on_close_request)

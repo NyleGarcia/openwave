@@ -162,18 +162,32 @@ OpenWave detects your init system at runtime:
 
 - **other** (macOS, Windows, no init detected) — the capture-fix section is disabled.
 
-### Start hidden in tray
+### App drawer, starting at login, starting in the tray
+
+All three are handled by the app; none needs a file copied by hand.
+
+The **app drawer entry** is written on launch to
+`~/.local/share/applications/openwave.desktop`, and rewritten if it goes
+stale — the `Exec` line records where OpenWave was found, so an entry written
+from a checkout that has since been installed properly would otherwise keep
+launching a path that no longer exists.
+
+**Start at login** and **Start in the tray** are switches in the sidebar,
+under *Startup*. They write `~/.config/autostart/openwave.desktop`, adding
+`--hide` for the tray-only case. Turning autostart off deletes that file;
+the drawer entry is a separate file and is left alone.
+
+Both are user-level files needing no privileges, which is why neither is part
+of the first-run setup that asks for a password. An entry a desktop
+environment has disabled in place (GNOME Tweaks does this rather than
+deleting it) reads back as off, so the switch cannot claim a login behaviour
+that will not happen.
+
+`--hide` still works on its own for a one-off:
+
 ```bash
 python3 -m wavexlr --hide
 ```
-
-### Start at login
-```bash
-cp /usr/share/openwave/openwave-autostart.desktop ~/.config/autostart/
-```
-
-### Desktop entry
-Copy `wavexlr.desktop` to `~/.local/share/applications/` for app launcher integration.
 
 ## Architecture
 
