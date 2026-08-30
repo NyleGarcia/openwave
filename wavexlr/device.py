@@ -127,6 +127,29 @@ def _alsa_get(card):
     return state
 
 
+def wave_present():
+    """True when any supported Wave is on the USB bus. Sysfs only -- no USB
+    permissions, no enumeration, cheap enough for a 2 s reconnect tick."""
+    from .profiles import PROFILES
+    wanted = {(f"{p.vid:04x}", f"{p.pid:04x}") for p in PROFILES}
+    base = "/sys/bus/usb/devices"
+    try:
+        entries = os.listdir(base)
+    except OSError:
+        return False
+    for entry in entries:
+        try:
+            with open(os.path.join(base, entry, "idVendor")) as f:
+                vid = f.read().strip()
+            with open(os.path.join(base, entry, "idProduct")) as f:
+                pid = f.read().strip()
+        except OSError:
+            continue
+        if (vid, pid) in wanted:
+            return True
+    return False
+
+
 # ALSA control name suffix -> role. The numids 4/5/6 hold on the hardware in
 # hand but are not promised across firmware revisions or models; the control
 # NAMES vary only in their product-string prefix ("PCM Playback Volume",

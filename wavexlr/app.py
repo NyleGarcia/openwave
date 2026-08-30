@@ -23,7 +23,7 @@ from .mixmatrix import MixMatrix
 from .sourcedialog import AddSourceDialog
 from . import (paths, setup, service, sources as sources_module,
                mixes as mixes_module, desktop as desktop_module,
-               recovery as recovery_module)
+               recovery as recovery_module, device as device_module)
 
 logging.basicConfig(level=logging.INFO, format="%(name)s: %(message)s")
 
@@ -65,6 +65,7 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         self._updating_ui = False
         self._last_state = None
         self._poll_id = None
+        self._reconnect_id = None
         self._stream_poll_id = None
         self._device_poll_countdown = self._DEVICE_POLL_EVERY
         # One pacer for every device slider. 80 ms leading+periodic+trailing,
@@ -578,7 +579,30 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         def _fail(e):
             self.status_label.set_label("Disconnected")
             self.status_label.add_css_class("dim-label")
+            self._start_reconnect()
         self._usb_async(_connect, _done, _fail)
+
+    def _start_reconnect(self):
+        """Watch for a Wave appearing, so plugging one in needs no Refresh.
+
+        A 2 s sysfs presence check while disconnected; the moment a supported
+        device is on the bus, hand off to the normal connect path. The tick
+        stops itself once connected and restarts from the failure paths, so
+        it never runs alongside a healthy poll.
+        """
+        if self._reconnect_id:
+            return
+        self._reconnect_id = GLib.timeout_add_seconds(2, self._reconnect_tick)
+
+    def _reconnect_tick(self):
+        if self.dev.connected:
+            self._reconnect_id = None
+            return False
+        if device_module.wave_present():
+            self._reconnect_id = None
+            self._try_connect()
+            return False
+        return True
 
     def _start_polling(self):
         """Start 10 Hz polling to sync hardware state."""
@@ -610,6 +634,7 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         self.dev.disconnect()
         self._stop_polling()
         self._notify_tray()
+        self._start_reconnect()
 
     def _apply_profile(self, profile):
         """Adapt the UI to the connected device model."""
@@ -680,6 +705,7 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         self.dev.disconnect()
         self._stop_polling()
         self._notify_tray()
+        self._start_reconnect()
 
     def _on_mute_changed(self, row, _pspec):
         if self._updating_ui or not self.dev.connected:
