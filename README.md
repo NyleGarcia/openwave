@@ -6,9 +6,14 @@ Linux control application for **Elgato Wave** audio devices — the **Wave XLR**
 
 | Device | USB ID | Controls |
 |---|---|---|
-| Wave XLR | `0fd9:007d` | Gain, mute, headphone volume, low impedance mode |
+| Wave XLR | `0fd9:007d` | Gain, mute, headphone volume, low impedance mode, **48 V phantom power** |
 | Wave XLR MK.2 | `0fd9:00a6` | as the Wave XLR — it enumerates as "Elgato XLR Dock" and speaks the same vendor protocol |
 | Wave:3 | `0fd9:0070` | Gain, mute, headphone volume, monitor mix |
+
+Phantom power lives at offset 6 of the Wave XLR config block (`0x01` on,
+`0x00` off), found by diffing the block across a toggle and confirmed against
+the device's own +48V indicator. The Dock has no front-panel button for it at
+all, so on that hardware the app is the only way to switch it.
 
 ## Features
 
@@ -22,7 +27,23 @@ Linux control application for **Elgato Wave** audio devices — the **Wave XLR**
 - **Per-mix output** — every mix chooses its own output device, or none at all
   for a mix that exists only to be captured. A mix keeps playing when the
   window is closed.
-- **Microphone controls** — Gain, mute (syncs with hardware button)
+- **Microphone rows appear by themselves** — every Elgato capture input gets a
+  row named after its device ("XLR Dock", "Wave XLR"), so two interfaces
+  connected at once are told apart instead of contending for a single
+  "microphone" row. They cannot be deleted, only muted.
+- **Microphone groups** — drag one microphone row onto another to group them.
+  Only one member of a group is live at a time and a single button hands the
+  group over to the next, which is what two microphones on one speaker
+  actually want; microphones in another group are untouched, so a second
+  speaker's microphone stays open. Two mics on one person and one on another
+  is two groups.
+- **Sensible defaults** — System, Game, Music, Browser and Voice rows ship
+  pre-matched to the usual applications, with System as the catch-all.
+- **Remote control** — mixes, source trims and microphone groups are drivable
+  from outside the window over the session bus. See
+  [Remote control](#remote-control).
+- **Microphone controls** — Gain, mute (syncs with hardware button), 48 V
+  phantom power
 - **Headphone controls** — Volume (syncs with hardware knob), low impedance mode
 - **Hardware sync** — 10 Hz polling keeps the app in sync with physical controls
 - **System integration** — Mute and HP volume sync bidirectionally with PipeWire/ALSA
@@ -35,6 +56,48 @@ Linux control application for **Elgato Wave** audio devices — the **Wave XLR**
 Wave devices use USB Class control transfers on endpoint 0 for device configuration. On Linux, `snd-usb-audio` normally blocks these transfers because `wIndex=0x3300` routes through interface 0 (owned by the audio driver). OpenWave uses `wIndex=0x3303` instead — the firmware only checks the `0x33` prefix, while the kernel sees interface 3 (unclaimed) and lets the transfer through. No driver detach needed, audio is never interrupted.
 
 Both devices speak the same vendor protocol (`bRequest` 0x85 read / 0x05 write) but with different config layouts: the Wave XLR uses a 34-byte block (gain uint16 @0, mute @4, HP volume int16 Q8.8 @9, knob mode @14, low-Z @33), the Wave:3 a 16-byte block (gain uint16 Q8.8 dB @0, mute @4, HP volume int16 Q8.8 @7, monitor mix uint16 Q8.8 percent @10, dial mode @12 — 1=gain, 2=headphones, 3=mix). Per-model constants live in `wavexlr/profiles.py`; `python3 -m wavexlr.probe` (`dump` / `watch` / `poke`) verifies a device against its profile and helps map new fields. The device services vendor transfers from only one process at a time, so quit OpenWave before probing.
+
+## Remote control
+
+OpenWave exports a small set of actions on the session bus, so a control
+surface can drive the parts of it that PipeWire alone cannot reach — the
+window owns the mixer state, and the GUI holds the only USB handle the
+firmware will serve.
+
+There is no protocol of its own: `GApplication` already exports
+`org.gtk.Actions` on `com.github.openwave`.
+
+```console
+$ gdbus call --session --dest com.github.openwave \
+    --object-path /com/github/openwave --method org.gtk.Actions.List
+(['switch-group', 'set-source-level', 'toggle-source-mute',
+  'source-groups', 'snapshot'],)
+```
+
+| Action | Parameter | Does |
+|---|---|---|
+| `switch-group` | `s` group name | Hands a microphone group to its next member |
+| `set-source-level` | `(sd)` id, 0–1 | Sets a source's trim |
+| `toggle-source-mute` | `s` id | Flips a source's mute, group rules included |
+| `source-groups` | — | State: group names worth switching between |
+| `snapshot` | — | State: every source's name, level, mute, group and kind, as JSON |
+
+The two read-only actions publish their answer as action *state* rather than
+returning it: `Activate` has no reply, but `Describe` reads state and `Changed`
+fires when it moves, so a reader can both poll and subscribe. Activate first to
+refresh, then describe.
+
+`snapshot` is one action rather than one per field because a remote control
+draws all of it on a single button, and reading it piecemeal would let the
+parts disagree mid-read.
+
+Everything goes through the window rather than the config files. `Mixer` holds
+the same dict the window holds and rewrites `sources.json` whole on every save,
+so a caller writing that file directly is overwritten the next time a fader
+moves.
+
+[**openwave-streamdeck**](https://github.com/NyleGarcia/openwave-streamdeck) is
+a Stream Deck plugin built on this.
 
 ## Install
 
@@ -114,7 +177,7 @@ wavexlr/
   mixer.py    — The router: intake sinks, per-cell loopbacks, stream claiming
   mixes.py    — Mix definitions store (~/.config/openwave/mixdefs.json)
   sources.py  — Source definitions store (~/.config/openwave/sources.json)
-  mixmatrix.py  — The sources x mixes grid widget
+  mixmatrix.py  — The sources x mixes grid widget (drag to reorder or group)
   mixdialog.py  — Create/rename a mix
   sourcedialog.py — Add or edit a source
   meter.py    — Level metering via pw-cat

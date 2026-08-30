@@ -172,3 +172,52 @@ restarts.
 
 Startup sweeps orphaned loopbacks by matching `openwave_`, which covers both
 the `openwave_loop_` cells and the mix capture sources named after their sink.
+
+## Groups
+
+A source row may name a group. Within one group exactly one row is unmuted;
+unmuting any member mutes the rest, and `switch_group` hands the group to the
+next member in row order.
+
+This is per-row rather than global on purpose. Two microphones on one speaker —
+a main and a backup, or two positions — comb-filter when both are open, so
+switching between them should be one gesture. A second speaker's microphone is
+a different group and is untouched by that gesture. A global "default source"
+switch cannot express two people at one table; two groups can.
+
+Grouping is a drop, not a dialog: dragging one row onto the middle of another
+puts it in the target's group, starting one named after the target if it had
+none. Dropping near an edge reorders instead. Two gestures, one control, and no
+way for the two rows to end up holding group names that differ by a typo.
+
+## Remote control
+
+`GApplication` already exports `org.gtk.Actions` on `com.github.openwave`, so
+letting something outside the window drive OpenWave needs no IPC of its own —
+only actions registered on the application. `switch-group`,
+`set-source-level` and `toggle-source-mute` do what the row's own controls do;
+`source-groups` and `snapshot` publish state to read back.
+
+Everything routes through the window, never around it. Two reasons, and both
+are structural rather than stylistic:
+
+- `Mixer` holds the same `sources` dict the window holds and rewrites
+  `sources.json` whole on every save. A caller that edited that file directly
+  would be silently overwritten the next time a fader moved.
+- The firmware serves vendor transfers to one process at a time, and the GUI
+  holds the handle. Device gain cannot be set by anyone else while OpenWave is
+  open.
+
+The read-only actions publish their answer as action *state*, because
+`org.gtk.Actions.Activate` has no reply. `Describe` returns state and `Changed`
+fires when it moves, so a caller can poll or subscribe; the convention is to
+activate first (which refreshes) and then describe.
+
+`snapshot` returns every source's name, level, mute, group and kind as one JSON
+string. One action rather than one per field: a remote control draws all of it
+on a single button, and five separate reads could catch the state mid-change
+and disagree with each other.
+
+Sends and trims are deliberately absent from that surface. They are re-applied
+on every reconcile, so a value set from outside would revert within a second —
+an action that silently undoes itself is worse than one that is not offered.
