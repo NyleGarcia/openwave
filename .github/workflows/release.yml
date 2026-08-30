@@ -5,10 +5,14 @@ name: Release
 # messages; this one writes prose commit subjects, which semantic-release
 # reads as "never release". So the version is the tag -- push v1.2.3 and
 # this builds the release objects -- and everything downstream of the
-# version (gate on the suite, build artifacts, publish a Release) is as
-# automatic as the plugin's.
+# version (gate on the suite, build artifacts, publish a Release, point the
+# PKGBUILD at it and publish to AUR) is as automatic as the plugin's.
 #
 #   git tag v1.2.3 && git push <remote> v1.2.3
+#
+# This workflow is the only one that creates Releases and tags carry no other
+# automation, so one tag push can never produce two Releases. The AUR job
+# no-ops quietly when the AUR_SSH_PRIVATE_KEY secret is absent (forks).
 
 on:
   push:
@@ -126,3 +130,75 @@ jobs:
             --title "OpenWave ${GITHUB_REF#refs/tags/v}" \
             --generate-notes \
             openwave-*.tar.gz openwave_*.deb sha256sums.txt
+
+  aur:
+    name: Publish to AUR
+    needs: [publish]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Install tools
+        run: pacman -Syu --noconfirm git openssh
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-objects
+
+      # The artifact tarball IS the file the Release serves, so its checksum
+      # is the one the PKGBUILD must pin. The old manual flow bumped pkgver
+      # without touching sha256sums, which could only ever be stale: the
+      # tarball it points at does not exist until this workflow publishes it.
+      - name: Point the PKGBUILD at this release
+        run: |
+          V="${GITHUB_REF#refs/tags/v}"
+          SUM=$(sha256sum "openwave-${V}.tar.gz" | cut -d' ' -f1)
+          sed -i "s/^pkgver=.*/pkgver=${V}/" PKGBUILD
+          sed -i "s/^pkgrel=.*/pkgrel=1/" PKGBUILD
+          sed -i "s/^sha256sums=.*/sha256sums=('${SUM}')/" PKGBUILD
+
+      - name: Commit the PKGBUILD back
+        run: |
+          git config --global --add safe.directory "$PWD"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add PKGBUILD
+          git diff --cached --quiet || git commit -m "Point the PKGBUILD at v${GITHUB_REF#refs/tags/v}"
+          git push
+
+      - name: Push to AUR
+        env:
+          AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+          AUR_USERNAME: ${{ secrets.AUR_USERNAME }}
+          AUR_EMAIL: ${{ secrets.AUR_EMAIL }}
+        run: |
+          if [ -z "$AUR_SSH_PRIVATE_KEY" ]; then
+            echo "AUR_SSH_PRIVATE_KEY not set; skipping AUR publish."
+            exit 0
+          fi
+          V="${GITHUB_REF#refs/tags/v}"
+          mkdir -p ~/.ssh
+          echo "$AUR_SSH_PRIVATE_KEY" > ~/.ssh/aur
+          chmod 600 ~/.ssh/aur
+          ssh-keyscan -t ed25519,rsa aur.archlinux.org > ~/.ssh/known_hosts 2>&1 || true
+          export GIT_SSH_COMMAND="ssh -i ~/.ssh/aur -o StrictHostKeyChecking=accept-new"
+          git config --global user.name "$AUR_USERNAME"
+          git config --global user.email "$AUR_EMAIL"
+          git config --global --add safe.directory '*'
+
+          git clone ssh://aur@aur.archlinux.org/openwave.git aur-repo
+          cp PKGBUILD aur-repo/PKGBUILD
+          useradd -m builder
+          chown -R builder:builder aur-repo
+          cd aur-repo
+          su builder -c "makepkg --printsrcinfo" > .SRCINFO
+          git add PKGBUILD .SRCINFO
+          git commit -m "Update to v${V}"
+          git push
