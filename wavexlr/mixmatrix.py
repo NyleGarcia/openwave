@@ -5,6 +5,8 @@ is wired to real device state via the parent app; other sources and per-cell
 mix routing are placeholders until PipeWire mix-sink backend lands (v0.3.0).
 """
 
+import logging
+
 import gi
 
 gi.require_version("Gtk", "4.0")

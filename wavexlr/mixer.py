@@ -1198,7 +1198,10 @@ class Mixer:
         # raise into _worker_loop's bare except, silently leaving a mix
         # unwired.
         with self._lock:
-            source_ids = ["mic"] + list(self._sources)
+            # No "mic" pseudo-source: a Wave device's input is an ordinary
+            # device source now, so routing it here as well would put the same
+            # microphone into every mix twice.
+            source_ids = list(self._sources)
             mix_ids = list(self._mixes)
         for source_id in source_ids:
             for mix_id in mix_ids:
@@ -1208,11 +1211,6 @@ class Mixer:
         state = self._state.get(
             f"{source_id}.{mix_id}", {"volume": 0.0, "muted": False}
         )
-        if source_id == "mic":
-            self._reconcile_capture_cell(
-                source_id, mix_id, self.mic, state["volume"], state["muted"],
-            )
-            return
         # Read without the lock, exactly as _reconcile_app_cell already does:
         # set_sources rebinds this dict rather than mutating it, so worker code
         # only ever sees a finished one.
@@ -1268,7 +1266,7 @@ class Mixer:
         if key not in self._procs:
             with self._lock:
                 src_name = (self._sources.get(source_id) or {}).get(
-                    "name", "Microphone" if source_id == "mic" else source_id)
+                    "name", source_id)
                 mix_name = (self._mixes.get(mix_id) or {}).get("name", mix_id)
             self._spawn_loopback(
                 key, capture_node, mix_sink, node_name,
