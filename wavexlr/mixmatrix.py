@@ -758,7 +758,11 @@ class SourceCell(Gtk.Box):
         )
         self._switch_btn.add_css_class("flat")
         self._switch_btn.add_css_class("circular")
-        self._switch_icon = Gtk.Image.new_from_icon_name("radio-symbolic")
+        # Two opposing arrows rather than a radio dot: this is an action --
+        # "make this one live" -- not a state to read. The state is already on
+        # the row, which is red when muted.
+        self._switch_icon = Gtk.Image.new_from_icon_name(
+            "mail-send-receive-symbolic")
         self._switch_btn.set_child(self._switch_icon)
         self._switch_btn.connect("clicked", lambda _b: self.emit("switch-clicked"))
         inner.append(self._switch_btn)
@@ -910,13 +914,13 @@ class SourceCell(Gtk.Box):
                     else "audio-volume-high-symbolic")
         self._mute_icon.set_from_icon_name(icon)
         self._mute_btn.set_tooltip_text("Unmute" if muted else "Mute")
-        if getattr(self, "_switch_icon", None) is not None:
-            self._switch_icon.set_from_icon_name(
-                "radio-symbolic" if muted else "radio-checked-symbolic"
-            )
-            self._switch_btn.set_sensitive(muted)
+        if getattr(self, "_switch_btn", None) is not None:
+            # Deliberately always sensitive. A control that greys out exactly
+            # when you press it reads as broken, and switching to the source
+            # that is already live is harmless.
             self._switch_btn.set_tooltip_text(
-                "Switch to this source" if muted else "This source is live"
+                "Switch to this source"
+                if muted else "This source is already live"
             )
         # A muted row should be obvious at a glance down the column, not a
         # difference of one small icon.
