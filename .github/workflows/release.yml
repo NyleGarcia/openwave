@@ -102,11 +102,12 @@ jobs:
       - name: RPM package
         run: |
           V="${{ steps.version.outputs.version }}"
+          RV="${V//-/\~}"   # rpm Version forbids '-'; ~ is its pre-release
           sudo apt-get install -y -qq rpm
           mkdir -p rpmbuild/{SOURCES,SPECS}
           cp "openwave-${V}.tar.gz" rpmbuild/SOURCES/
-          sed "s/@VERSION@/${V}/" packaging/rpm/openwave.spec \
-            > rpmbuild/SPECS/openwave.spec
+          sed -e "s/@VERSION@/${RV}/" -e "s/@SRCVER@/${V}/" \
+            packaging/rpm/openwave.spec > rpmbuild/SPECS/openwave.spec
           rpmbuild --define "_topdir $PWD/rpmbuild" \
             --define "dist %{nil}" -bb rpmbuild/SPECS/openwave.spec
           cp rpmbuild/RPMS/noarch/openwave-*.rpm .

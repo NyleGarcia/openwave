@@ -15,7 +15,9 @@ Summary:        The audio mixing matrix for Linux
 License:        MIT
 URL:            https://github.com/NyleGarcia/openwave
 BuildArch:      noarch
-Source0:        openwave-%{version}.tar.gz
+# @SRCVER@ is the tarball's own version string, which for a dispatch
+# dry-run contains characters (0.0.0-dev.<sha>) rpm's Version cannot.
+Source0:        openwave-@SRCVER@.tar.gz
 
 Requires:       python3 >= 3.10
 Requires:       python3-gobject
@@ -34,7 +36,7 @@ Wave:3 microphone. A reverse-engineered replacement for Elgato Wave
 Link, built with GTK4 and libadwaita on PipeWire.
 
 %prep
-%autosetup
+%autosetup -n openwave-@SRCVER@
 
 %install
 make install DESTDIR=%{buildroot} PREFIX=/usr PYTHON=python3 \
