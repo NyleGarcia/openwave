@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>com.github.openwave</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <name>OpenWave</name>
+  <summary>The audio mixing matrix for Linux</summary>
+  <description>
+    <p>
+      Per-app mixes with per-mix outputs, plus native control of Elgato Wave
+      hardware — the Wave XLR interface (original and MK.2/XLR Dock) and the
+      Wave:3 microphone. A reverse-engineered replacement for Elgato Wave
+      Link, built with GTK4 and libadwaita on PipeWire.
+    </p>
+    <p>
+      Sources are rows, mixes are columns, and each cell is how much of that
+      source the mix receives. Applications are matched by name, hardware
+      microphones get their own rows automatically, microphone groups keep
+      one mic live at a time, every mix can feed its own output device or be
+      captured as a virtual microphone, and levels survive a reboot.
+    </p>
+  </description>
+  <launchable type="desktop-id">openwave.desktop</launchable>
+  <url type="homepage">https://github.com/NyleGarcia/openwave</url>
+  <url type="bugtracker">https://github.com/NyleGarcia/openwave/issues</url>
+  <screenshots>
+    <screenshot type="default">
+      <caption>The mixing matrix with grouped microphones and three mixes</caption>
+      <image>https://raw.githubusercontent.com/NyleGarcia/openwave/v1.1.0/docs/screenshot.png</image>
+    </screenshot>
+  </screenshots>
+  <categories>
+    <category>AudioVideo</category>
+    <category>Audio</category>
+    <category>Mixer</category>
+  </categories>
+  <developer id="com.github.nylegarcia">
+    <name>OpenWave contributors</name>
+  </developer>
+  <recommends>
+    <control>pointing</control>
+    <control>keyboard</control>
+  </recommends>
+  <supports>
+    <modalias>usb:v0FD9p007D*</modalias>
+    <modalias>usb:v0FD9p00A6*</modalias>
+    <modalias>usb:v0FD9p0070*</modalias>
+  </supports>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="1.1.0" date="2026-08-30"/>
+    <release version="1.0.0" date="2026-05-25"/>
+    <release version="0.1.5" date="2026-04-14"/>
+  </releases>
+</component>

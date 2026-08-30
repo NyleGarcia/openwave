@@ -31,6 +31,7 @@ install: check-prefix
 	install -Dm644 icons/openwave-symbolic.svg $(ICONDIR)/symbolic/apps/openwave-symbolic.svg
 	install -Dm644 icons/openwave-muted-symbolic.svg $(ICONDIR)/symbolic/apps/openwave-muted-symbolic.svg
 	install -Dm644 icons/openwave-attention-symbolic.svg $(ICONDIR)/symbolic/apps/openwave-attention-symbolic.svg
+	install -Dm644 com.github.openwave.metainfo.xml $(DATADIR)/metainfo/com.github.openwave.metainfo.xml
 	install -Dm644 README.md $(DOCDIR)/README.md
 	install -Dm644 LICENSE $(LICENSEDIR)/LICENSE
 # hicolor keeps a cache, and GTK trusts it over the directory when it is
@@ -46,6 +47,7 @@ uninstall:
 	rm -f $(BINDIR)/openwave
 	rm -f $(BINDIR)/openwave-daemon
 	rm -f $(DESKTOPDIR)/openwave.desktop
+	rm -f $(DATADIR)/metainfo/com.github.openwave.metainfo.xml
 	rm -rf $(APPDIR)
 	rm -rf $(DOCDIR)
 	rm -f $(ICONDIR)/scalable/apps/openwave.svg

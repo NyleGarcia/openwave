@@ -190,6 +190,21 @@ puts it in the target's group, starting one named after the target if it had
 none. Dropping near an edge reorders instead. Two gestures, one control, and no
 way for the two rows to end up holding group names that differ by a typo.
 
+## The PipeWire seam
+
+`Mixer` never calls PipeWire tools directly: every `pw-cli`, `pw-loopback`,
+`pw-dump`, `wpctl` invocation goes through a `pw` adapter object it is
+constructed with. In production that adapter runs the real subprocesses; in
+tests `Mixer(pw=FakePipeWire())` substitutes an in-memory graph.
+
+The seam exists because the reconcile and spawn paths are where the worst
+regressions have lived — double-routed audio, loopbacks against dead links,
+faders driving nothing — and before it, those paths were ~30 scattered
+subprocess calls nothing could exercise. With the fake they are
+call-sequence assertions: configure what the graph holds, run one reconcile,
+read back what the mixer decided to do about it.
+`tests/test_mixer_reconcile.py` is built on this.
+
 ## Remote control
 
 `GApplication` already exports `org.gtk.Actions` on `com.github.openwave`, so
