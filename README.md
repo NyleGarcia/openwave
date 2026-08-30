@@ -207,6 +207,14 @@ them declaratively:
 services.udev.packages = [ openwave ];
 ```
 
+### Bazzite / Fedora Atomic
+
+Immutable images change what "install" means — see
+[docs/install-bazzite.md](docs/install-bazzite.md). Short version: run
+from a checkout (no build step, first-run setup works as-is since `/etc`
+is writable and the service is a user unit), layering only PyGObject if
+the image lacks it.
+
 ### Flatpak (experimental)
 
 A manifest lives at
