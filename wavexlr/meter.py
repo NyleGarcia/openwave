@@ -32,6 +32,10 @@ class MeterMonitor:
     CHUNK_BYTES = 1024
 
     def __init__(self):
+        # While the window is hidden the bars do not exist to anyone;
+        # readers keep draining (byte-flow stall detection depends on it)
+        # but nothing crosses to the GTK thread.
+        self.ui_suspended = False
         self._procs = {}        # source_id -> Popen
         self._threads = {}      # source_id -> Thread
         self._stop_flags = {}   # source_id -> threading.Event
@@ -130,8 +134,22 @@ class MeterMonitor:
         for sid in list(self._procs.keys()):
             self.stop(sid)
 
+    # Frames of continued dispatch after the signal goes quiet, so a
+    # bar with peak-hold ballistics animates down before the stream of
+    # updates stops. ~20 frames at ~15 Hz is over a second of tail.
+    _QUIET = 0.004
+    _TAIL_FRAMES = 20
+
     def _reader(self, source_id, proc, stop_flag):
-        """Background thread: read s16 chunks, compute peak, marshal to UI."""
+        """Background thread: read s16 chunks, compute peak, marshal to UI.
+
+        Silence is suppressed: nine meters at 15 Hz were over a hundred
+        main-loop wakeups and redraws a second for bars sitting at zero.
+        A quiet chunk still counts for the byte-flow stall detection — it
+        is only the UI dispatch that rests.
+        """
+        tail = 0
+        settled = False
         try:
             while not stop_flag.is_set():
                 data = proc.stdout.read(self.CHUNK_BYTES)
@@ -141,6 +159,20 @@ class MeterMonitor:
                 n = len(data) // 2
                 samples = struct.unpack(f"<{n}h", data[: n * 2])
                 peak = max(abs(s) for s in samples) / 32768.0
+                if self.ui_suspended:
+                    settled = False
+                    tail = 0
+                    continue
+                if peak >= self._QUIET:
+                    tail = self._TAIL_FRAMES
+                    settled = False
+                elif tail:
+                    tail -= 1
+                elif settled:
+                    continue
+                else:
+                    peak = 0.0
+                    settled = True
                 GLib.idle_add(self._dispatch, source_id, peak)
         except (OSError, ValueError):
             pass

@@ -113,6 +113,13 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         # unseeded snapshot draws rows live rather than dead in the meantime.
         self._refresh_outputs()
         self.meter = MeterMonitor()
+        # Hidden in the tray, the level bars exist for nobody: pause the
+        # UI half of metering with the window. Stall detection rides the
+        # byte flow, not the dispatches, so it keeps watching regardless.
+        self.connect("map",
+                     lambda *_a: setattr(self.meter, "ui_suspended", False))
+        self.connect("unmap",
+                     lambda *_a: setattr(self.meter, "ui_suspended", True))
         self._stall_watch = recovery_module.StallWatch()
         self._meter_targets = {}
         self._wire_matrix_cells()
@@ -718,6 +725,12 @@ class WaveXLRWindow(Adw.ApplicationWindow):
             self._apply_device_info()
             self._start_polling()
             self._start_device_watch()
+            # Discovery is not a launch-time-only event: a Wave plugged in
+            # (or back in, after its row was removed while unplugged) gets
+            # its row when its USB connect lands here — event-driven,
+            # because the pw-dump behind discovery is far too heavy for a
+            # periodic main-thread tick (measured: ~8% of a core at 6 s).
+            self._autodiscover_elgato_inputs()
         def _fail(e):
             self._connecting = False
             self._devs = []
@@ -1335,11 +1348,6 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         if check_devices:
             self._device_poll_countdown = self._DEVICE_POLL_EVERY
             self.mixer.request_capture_poll()
-            # Discovery is not a launch-time-only event: a Wave plugged in
-            # (or back in, after its row was removed while unplugged) should
-            # get its row now, not on the next restart. Idempotent — bound
-            # and already-offered nodes are skipped.
-            self._autodiscover_elgato_inputs()
         for source_id, source in list(self._sources.items()):
             if sources_module.kind(source) == sources_module.KIND_DEVICE:
                 if check_devices:
