@@ -1164,7 +1164,7 @@ class Mixer:
     # ----- subprocess lifecycle -----
     def _spawn_loopback(self, key, capture_source_name, playback_target,
                         node_name, detach=False, playback_extra="",
-                        description=None):
+                        description=None, native_capture=False):
         """Spawn a pw-loopback and *manually* link the capture side to
         `capture_source_name`'s output ports. We disable autoconnect on capture
         because the session manager will otherwise hijack the loopback by
@@ -1191,11 +1191,23 @@ class Mixer:
         ident = f'application.name=OpenWave node.description="{label}" '
         cap_ident = f'application.name=OpenWave node.description="{label} (capture)" '
 
+        # Manual linking exists because a null sink's MONITOR cannot be an
+        # autoconnect target — the session manager falls back to the
+        # default source, which is the hijack documented above. A real
+        # Audio/Source (a hardware capture node, an fx chain's published
+        # Source) resolves fine, and letting WirePlumber own that link
+        # means it also REPAIRS it — hand-made links die silently with
+        # their node and stay dead. native_capture chooses per target.
+        if native_capture:
+            cap_props = (f"target.object={capture_source_name} "
+                         f"node.name={capture_node_name} ")
+        else:
+            cap_props = f"node.autoconnect=false node.name={capture_node_name} "
         proc = self._pw.spawn_loopback(
             [
                 "pw-loopback",
                 "--capture-props="
-                f"node.autoconnect=false node.name={capture_node_name} "
+                + cap_props
                 + cap_ident +
                 "audio.channels=2 audio.position=[FL,FR]",
                 "--playback-props="
@@ -1210,7 +1222,8 @@ class Mixer:
         if proc is None:
             return
         self._procs[key] = proc
-        self._link_capture(capture_source_name, capture_node_name)
+        if not native_capture:
+            self._link_capture(capture_source_name, capture_node_name)
 
     def _link_capture(self, source_node_name, capture_node_name, retries=20):
         """Wire each output port of `source_node_name` to a corresponding
@@ -2096,6 +2109,9 @@ class Mixer:
             self._spawn_loopback(
                 key, capture_node, mix_sink, node_name,
                 description=f"{src_name} \u2192 {mix_name}",
+                # Devices and fx chains are real Sources: the session
+                # manager can own \u2014 and repair \u2014 this link.
+                native_capture=True,
             )
             if key in self._procs:
                 self._cell_capture[key] = capture_node

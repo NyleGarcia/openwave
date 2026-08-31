@@ -105,10 +105,11 @@ class Lifecycle(unittest.TestCase):
         self.mx._reconcile_fx("dock")
         self.mx._reconcile_cell("dock", "chat")
         fx_node = mixer_mod.fx_node_name("dock")
-        self.assertIn(("ports", "-o", fx_node), self.pw.calls,
-                      "the cell loopback must link from the fx node, "
+        loops = [p for p in self.pw.spawned if p.argv[0] == "pw-loopback"]
+        cap = loops[-1].argv[1]
+        self.assertIn(f"target.object={fx_node}", cap,
+                      "the cell loopback must capture the fx node, "
                       "not the raw device")
-        self.assertNotIn(("ports", "-o", ARCTIS), self.pw.calls)
 
     def test_existing_cells_retarget_when_fx_toggles_on(self):
         """The real-world order: cells exist first, fx enabled later. The
@@ -126,15 +127,16 @@ class Lifecycle(unittest.TestCase):
         self.mx._reconcile_cell("dock", "chat")
         self.assertTrue(raw_loop.terminated,
                         "the raw-route loopback must be rebuilt")
-        self.assertIn(("ports", "-o", mixer_mod.fx_node_name("dock")),
-                      self.pw.calls)
+        loops = [p for p in self.pw.spawned if p.argv[0] == "pw-loopback"]
+        self.assertIn(f"target.object={mixer_mod.fx_node_name('dock')}",
+                      loops[-1].argv[1])
 
         # and back off again
-        self.pw.calls.clear()
         self.mx._sources["dock"]["fx"] = {}
         self.mx._reconcile_fx("dock")
         self.mx._reconcile_cell("dock", "chat")
-        self.assertIn(("ports", "-o", ARCTIS), self.pw.calls)
+        loops = [p for p in self.pw.spawned if p.argv[0] == "pw-loopback"]
+        self.assertIn(f"target.object={ARCTIS}", loops[-1].argv[1])
 
     def test_a_dying_chain_does_not_respawn_loop(self):
         """A missing LADSPA library kills the chain instantly; respawning
