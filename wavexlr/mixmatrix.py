@@ -861,6 +861,10 @@ class SourceCell(Gtk.Box):
         )
         self._switch_btn.add_css_class("flat")
         self._switch_btn.add_css_class("circular")
+        # Hidden means blanked-in-place, never removed: every optional
+        # control keeps its column or the sliders zigzag across rows.
+        self._switch_btn.set_visible(True)
+        self._reserve(self._switch_btn, False)
         # Two opposing arrows rather than a radio dot: this is an action --
         # "make this one live" -- not a state to read. The state is already on
         # the row, which is red when muted.
@@ -911,17 +915,24 @@ class SourceCell(Gtk.Box):
             self._level.add_offset_value(Gtk.LEVEL_BAR_OFFSET_FULL, 1.00)
             inner.append(self._level)
 
+        # A text label, deliberately: no icon theme ships an "effects"
+        # glyph everywhere, Breeze drew the broken-image box here, and
+        # "FX" is the clearer button anyway. Built for EVERY row and
+        # merely blanked on non-capture ones, because the controls to its
+        # left only line up across rows if each optional widget keeps its
+        # column when idle.
         self._fx_widgets = None
+        self._fx_btn = Gtk.MenuButton(
+            label="FX",
+            valign=Gtk.Align.CENTER,
+            tooltip_text="Effects: low cut, gate, compressor, EQ, delay",
+        )
+        self._fx_btn.add_css_class("flat")
         if is_capture:
-            fx_btn = Gtk.MenuButton(
-                icon_name="preferences-color-symbolic",
-                valign=Gtk.Align.CENTER,
-                tooltip_text="Effects (low cut, EQ, delay)",
-            )
-            fx_btn.add_css_class("flat")
-            fx_btn.add_css_class("circular")
-            fx_btn.set_popover(self._build_fx_popover())
-            inner.append(fx_btn)
+            self._fx_btn.set_popover(self._build_fx_popover())
+        else:
+            self._reserve(self._fx_btn, False)
+        inner.append(self._fx_btn)
 
         if editable:
             edit_btn = Gtk.Button(
@@ -1114,22 +1125,34 @@ class SourceCell(Gtk.Box):
         finally:
             self._fx_updating = False
 
+    @staticmethod
+    def _reserve(widget, shown):
+        """Blank a control in place instead of removing it.
+
+        Rows line up column by column only while every optional widget
+        keeps its allocation; set_visible collapses the slot and shifts
+        everything beside it, which is how the sliders came to zigzag.
+        """
+        widget.set_opacity(1.0 if shown else 0.0)
+        widget.set_sensitive(shown)
+        widget.set_can_target(shown)
+
     def set_removable(self, removable, tooltip="Remove source"):
-        """Show or hide the remove button on a row that owns one.
+        """Show or blank the remove button on a row that owns one.
 
         Auto-discovered device rows are built with the button and normally
-        hide it: while the hardware is connected, removing its row would
+        blank it: while the hardware is connected, removing its row would
         only make it come back confusing. Unplugged, the row is clutter the
         user may clear — so removability follows presence.
         """
         if self._remove_btn is not None:
-            self._remove_btn.set_visible(removable)
-            self._remove_btn.set_tooltip_text(tooltip)
+            self._reserve(self._remove_btn, removable)
+            self._remove_btn.set_tooltip_text(tooltip if removable else None)
 
     def set_group(self, group):
         """Show which exclusivity group this row is in, if any."""
         group = (group or "").strip()
-        self._switch_btn.set_visible(bool(group))
+        self._reserve(self._switch_btn, bool(group))
         self._group_lbl.set_label(f"\u2b24 {group}" if group else "")
         self._group_lbl.set_visible(bool(group))
         self._group_lbl.set_tooltip_text(
