@@ -43,8 +43,8 @@ class RenderConfig(unittest.TestCase):
         self.assertIn('plugin = "sc4m_1916"', conf)
         self.assertIn('"Ratio (1:n)" = 4.0', conf)
         # channel-strip order: cut, gate, compress
-        self.assertIn('output = "hp:Out" input = "gate:In"', conf)
-        self.assertIn('output = "gate:Out" input = "comp:In"', conf)
+        self.assertIn('output = "hp:Out" input = "gate:Input"', conf)
+        self.assertIn('output = "gate:Output" input = "comp:Input"', conf)
 
     def test_neutral_plus_mono_is_a_bare_copy(self):
         conf = mixer_mod.render_fx_config(_dev_source(mono=True))

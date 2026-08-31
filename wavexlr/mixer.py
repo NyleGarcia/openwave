@@ -115,7 +115,10 @@ def render_fx_config(source):
             f'control = {{ "Threshold (dB)" = {float(f["gate_thresh"]):.1f} '
             '"Attack (ms)" = 10.0 "Hold (ms)" = 120.0 "Decay (ms)" = 150.0 '
             '"Range (dB)" = -70.0 "LF key filter (Hz)" = 30.8 '
-            '"HF key filter (Hz)" = 23000.0 "Output select" = 0.0 }'))
+            '"HF key filter (Hz)" = 23000.0 '
+            # The port's NAME includes its legend, verified against the
+            # installed library — "Output select" alone is not a port.
+            '"Output select (-1 = key listen, 0 = gate, 1 = bypass)" = 0.0 }'))
     if f["comp"]:
         nodes.append((
             "comp", "ladspa/sc4m",
@@ -150,8 +153,17 @@ def render_fx_config(source):
                 f'label = {label} {extra} }}')
 
     node_lines = "\n".join(_node_line(*n) for n in nodes)
+    # Builtins name their audio ports In/Out; LADSPA nodes expose the
+    # library's own names, which for the swh plugins are Input/Output —
+    # verified against the installed .so, and a wrong name is fatal to
+    # the whole graph, not a warning.
+    def _ports(node):
+        return (("Input", "Output") if node[1].startswith("ladspa/")
+                else ("In", "Out"))
+
     link_lines = "\n".join(
-        f'                    {{ output = "{a[0]}:Out" input = "{b[0]}:In" }}'
+        f'                    {{ output = "{a[0]}:{_ports(a)[1]}" '
+        f'input = "{b[0]}:{_ports(b)[0]}" }}'
         for a, b in zip(nodes, nodes[1:])
     )
     label = source.get("name", source["id"])
