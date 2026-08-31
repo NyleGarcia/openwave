@@ -891,6 +891,7 @@ class Mixer:
         self._procs = {}
         self._fx_conf = {}   # source_id -> rendered fx config, for respawn diff
         self._fx_failed = {}  # source_id -> config a chain died under
+        self._cell_capture = {}  # cell key -> node its loopback drinks from
         self._state = self._load_state()
         if self._migrate_state():
             self._save_state()
@@ -1228,6 +1229,7 @@ class Mixer:
                 return
 
     def _destroy_loopback(self, key):
+        self._cell_capture.pop(key, None)
         proc = self._procs.pop(key, None)
         if proc is None:
             return
@@ -2078,6 +2080,14 @@ class Mixer:
         if not capture_node or not mix_sink or volume <= 0.0 or absent:
             self._destroy_loopback(key)
             return
+        # A live loopback pinned to a different capture source than the one
+        # wanted now — the fx chain toggled on or off — must be rebuilt:
+        # the links are made once at spawn, so an existing process is an
+        # existing ROUTE, not just an existing process. Without this, cells
+        # created before the chain kept drinking raw forever.
+        if key in self._procs \
+                and self._cell_capture.get(key) not in (None, capture_node):
+            self._destroy_loopback(key)
         if key not in self._procs:
             with self._lock:
                 src_name = (self._sources.get(source_id) or {}).get(
@@ -2087,6 +2097,8 @@ class Mixer:
                 key, capture_node, mix_sink, node_name,
                 description=f"{src_name} \u2192 {mix_name}",
             )
+            if key in self._procs:
+                self._cell_capture[key] = capture_node
         node_id = self._pw.node_id(node_name)
         if node_id is not None:
             # cell fader x source trim: the row slider scales this source

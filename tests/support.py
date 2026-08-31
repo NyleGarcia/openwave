@@ -66,6 +66,7 @@ def bare_mixer(**attrs):
     # persisted without a subprocess ever being spawned.
     mx._fx_conf = {}
     mx._fx_failed = {}
+    mx._cell_capture = {}
     mx._pending = {}
     mx._pending_lock = threading.Lock()
     mx._wake = threading.Event()

@@ -110,6 +110,32 @@ class Lifecycle(unittest.TestCase):
                       "not the raw device")
         self.assertNotIn(("ports", "-o", ARCTIS), self.pw.calls)
 
+    def test_existing_cells_retarget_when_fx_toggles_on(self):
+        """The real-world order: cells exist first, fx enabled later. The
+        loopback's links are made once at spawn, so retargeting means
+        rebuild — an existing process is an existing ROUTE."""
+        self.mx._mixes = {"chat": {"id": "chat", "name": "Chat",
+                                   "sink": "openwave_chat_mix"}}
+        self.mx._state = {"dock.chat": {"volume": 0.8, "muted": False}}
+        self.mx._sources["dock"]["fx"] = {}
+        self.mx._reconcile_cell("dock", "chat")     # raw route exists
+        raw_loop = [p for p in self.pw.spawned if p.argv[0] != "pipewire"][0]
+
+        self.mx._sources["dock"]["fx"] = {"lowcut": 80}
+        self.mx._reconcile_fx("dock")
+        self.mx._reconcile_cell("dock", "chat")
+        self.assertTrue(raw_loop.terminated,
+                        "the raw-route loopback must be rebuilt")
+        self.assertIn(("ports", "-o", mixer_mod.fx_node_name("dock")),
+                      self.pw.calls)
+
+        # and back off again
+        self.pw.calls.clear()
+        self.mx._sources["dock"]["fx"] = {}
+        self.mx._reconcile_fx("dock")
+        self.mx._reconcile_cell("dock", "chat")
+        self.assertIn(("ports", "-o", ARCTIS), self.pw.calls)
+
     def test_a_dying_chain_does_not_respawn_loop(self):
         """A missing LADSPA library kills the chain instantly; respawning
         every reconcile would fork a corpse every two seconds forever."""

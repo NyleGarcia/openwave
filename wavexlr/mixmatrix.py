@@ -1007,6 +1007,26 @@ class SourceCell(Gtk.Box):
         self._fx_comp_ratio = scale(1, 10, 0.5, digits=1)
         row("Ratio", self._fx_comp_ratio)
 
+        # A slider whose effect is off is either misleading (it moves,
+        # nothing happens) or a statement of intent. Both, resolved:
+        # the sliders dim while their switch is off, and dragging one
+        # anyway flips the switch — choosing a threshold IS enabling.
+        def bind(sw, *scales):
+            def sync(*_a):
+                for s in scales:
+                    s.set_sensitive(sw.get_active())
+            sw.connect("notify::active", sync)
+            sync()
+            for s in scales:
+                def enable(_s, sw=sw):
+                    if not getattr(self, "_fx_updating", False) \
+                            and not sw.get_active():
+                        sw.set_active(True)
+                s.connect("value-changed", enable)
+
+        bind(self._fx_gate, self._fx_gate_thresh)
+        bind(self._fx_comp, self._fx_comp_thresh, self._fx_comp_ratio)
+
         def eq_scale():
             s = Gtk.Scale(
                 orientation=Gtk.Orientation.HORIZONTAL,
