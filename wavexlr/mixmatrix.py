@@ -775,6 +775,8 @@ class SourceCell(Gtk.Box):
         "edit-clicked": (GObject.SignalFlags.RUN_FIRST, None, ()),
         # DSP popover moved; read the values back with fx_settings()
         "fx-changed": (GObject.SignalFlags.RUN_FIRST, None, ()),
+        # "Auto" pressed in the DSP popover: run the calibration wizard
+        "fx-autotune": (GObject.SignalFlags.RUN_FIRST, None, ()),
     }
 
     def __init__(self, *, name, icon_name, has_level, removable=False,
@@ -968,6 +970,12 @@ class SourceCell(Gtk.Box):
             r.append(lbl)
             r.append(widget)
             box.append(r)
+
+        auto_btn = Gtk.Button(label="Auto-calibrate gate + comp")
+        auto_btn.connect("clicked",
+                         lambda _b: (pop.popdown(),
+                                     self.emit("fx-autotune")))
+        box.append(auto_btn)
 
         self._fx_lowcut = Gtk.DropDown.new_from_strings(
             ["Off", "80 Hz", "120 Hz"])

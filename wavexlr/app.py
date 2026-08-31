@@ -1666,6 +1666,7 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         if sources_module.kind(source) == sources_module.KIND_DEVICE:
             cell.set_fx(sources_module.fx(source))
             cell.connect("fx-changed", self._on_source_fx_changed, source_id)
+            cell.connect("fx-autotune", self._on_fx_autotune, source_id)
         source = self._sources.get(source_id, {})
         cell.set_volume(float(source.get("level", 1.0)))
         cell.set_muted(bool(source.get("muted", False)))
@@ -1677,6 +1678,98 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         self.mixer.set_source_level(
             source_id, volume, self._sources.get(source_id, {}).get("muted", False))
         sources_module.save(self._sources)
+
+    def _on_fx_autotune(self, cell, source_id):
+        """Two guided measurements, then gate and compressor set to fit.
+
+        Measured on the RAW device node — the chain, if any, keeps
+        running untouched, so a re-calibration is not itself colored by
+        the previous calibration.
+        """
+        from . import calibrate
+        source = self._sources.get(source_id)
+        node = (source or {}).get("node_name")
+        if not node or not self.mixer.capture_device_present(node):
+            err = Adw.AlertDialog(heading="Cannot calibrate",
+                                  body="The device is not connected.")
+            err.add_response("ok", "OK")
+            err.choose(self, None, lambda d, r: d.choose_finish(r))
+            return
+
+        intro = Adw.AlertDialog(
+            heading="Auto-calibrate",
+            body=("Two short measurements of this microphone:\n\n"
+                  f"1. Stay silent for {calibrate.FLOOR_SECONDS} seconds "
+                  "(room + device noise floor)\n"
+                  f"2. Speak normally for {calibrate.SPEECH_SECONDS} seconds\n\n"
+                  "Gate and compressor are then set to fit what was heard."),
+        )
+        intro.add_response("cancel", "Cancel")
+        intro.add_response("start", "Start")
+        intro.set_response_appearance("start", Adw.ResponseAppearance.SUGGESTED)
+        intro.set_default_response("start")
+
+        def _go(d, result):
+            if d.choose_finish(result) == "start":
+                self._calibrate_run(cell, source_id, node)
+
+        intro.choose(self, None, _go)
+
+    def _calibrate_run(self, cell, source_id, node):
+        from . import calibrate
+        state = {"cancelled": False}
+        prog = Adw.AlertDialog(heading="Calibrating…",
+                               body="🤫  Stay silent…")
+        prog.add_response("cancel", "Cancel")
+
+        def _on_cancel(d, result):
+            d.choose_finish(result)
+            state["cancelled"] = True
+
+        prog.choose(self, None, _on_cancel)
+
+        def _work():
+            floor = calibrate.capture_window_peaks_db(
+                node, calibrate.FLOOR_SECONDS)
+            if state["cancelled"]:
+                return None
+            GLib.idle_add(prog.set_body, "🗣  Now speak normally…")
+            speech = calibrate.capture_window_peaks_db(
+                node, calibrate.SPEECH_SECONDS)
+            if state["cancelled"]:
+                return None
+            return calibrate.analyze(floor, speech)
+
+        def _done(result):
+            prog.force_close()
+            if result is None:
+                return
+            source = self._sources.get(source_id)
+            if source is None:
+                return
+            source["fx"] = {**sources_module.fx(source), **result["fx"]}
+            cell.set_fx(sources_module.fx(source))
+            sources_module.save(self._sources)
+            self.mixer.set_sources(self._sources)
+            m, f = result["measured"], result["fx"]
+            report = Adw.AlertDialog(
+                heading="Calibrated",
+                body=(f"Noise floor: {m['floor_db']} dBFS\n"
+                      f"Voice: {m['quiet_voice_db']} to "
+                      f"{m['loud_voice_db']} dBFS\n\n"
+                      f"Gate set to {f['gate_thresh']} dB, compressor to "
+                      f"{f['comp_thresh']} dB at {f['comp_ratio']:.0f}:1."),
+            )
+            report.add_response("ok", "OK")
+            report.choose(self, None, lambda d, r: d.choose_finish(r))
+
+        def _fail(exc):
+            prog.force_close()
+            err = Adw.AlertDialog(heading="Calibration failed", body=str(exc))
+            err.add_response("ok", "OK")
+            err.choose(self, None, lambda d, r: d.choose_finish(r))
+
+        self._usb_async(_work, on_done=_done, on_error=_fail)
 
     _FX_DEBOUNCE_MS = 400
 

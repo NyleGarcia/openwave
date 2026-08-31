@@ -13,6 +13,12 @@ versions are git tags (see [Releases](../../releases)).
   connected, the capture-fix daemon keeps one keepalive pin per device,
   scenes record hardware state per serial number, and the tray reports
   muted when any device's hardware mute is down.
+- **Auto-calibration**: one button in the effects popover measures the
+  microphone — three silent seconds for the floor, five spoken ones for
+  the voice — and sets the gate between floor and quietest word, the
+  compressor under the loudest, reporting the numbers it heard. A
+  measurement that hears no clear speech says so instead of emitting a
+  threshold computed from silence.
 - **Per-microphone DSP chain**: every capture row gains an effects
   popover — low cut (80/120 Hz), three-band presence EQ, alignment
   delay up to 500 ms, and forced mono — built from PipeWire's builtin
