@@ -81,6 +81,8 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         # during a drag into one set_cell. {(source_id, mix_id): timeout_id}.
         self._cell_debounce_ids = {}
         self._fx_debounce_ids = {}
+        self._remote_levels = {}
+        self._push_id = None
         # One-shot re-read of the routing after a mix output change settles.
         self._output_refresh_id = None
         self._sources = sources_module.load_seeded()
@@ -915,6 +917,7 @@ class WaveXLRWindow(Adw.ApplicationWindow):
             self._enforce_exclusive_group(source_id)
         sources_module.save(self._sources)
         self._notify_tray()
+        self._push_remote_state()
 
     def _on_poll_result(self, result):
         self._poll_busy = False
@@ -1124,10 +1127,11 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         if self._meter_targets.get(key) == sink and self.meter.running(key):
             return
         self._meter_targets[key] = sink
-        self.meter.start(
-            key, sink,
-            lambda level, mid=mix_id: self.matrix.set_mix_level(mid, level),
-            capture_sink=True)
+        def _on_mix_level(level, mid=mix_id):
+            self._remote_levels[f"mix:{mid}"] = round(float(level), 4)
+            self.matrix.set_mix_level(mid, level)
+
+        self.meter.start(key, sink, _on_mix_level, capture_sink=True)
 
     def _stop_mix_meter(self, mix_id):
         key = f"mix:{mix_id}"
@@ -1496,9 +1500,19 @@ class WaveXLRWindow(Adw.ApplicationWindow):
             cell.set_waiting(waiting, hint)
 
     def _set_source_level(self, source_id, level):
+        self._remote_levels[f"src:{source_id}"] = round(float(level), 4)
         cell = self.matrix.source(source_id)
         if cell is not None:
             cell.set_level(level)
+
+    def remote_levels(self):
+        """Every live meter's latest peak, as JSON, for the `levels` action.
+
+        Fed by the same callbacks that move the bars — publishing costs a
+        dict write per meter frame, and reading is one Describe. A remote
+        polls this only while a dial with a meter is actually on screen.
+        """
+        return json.dumps(self._remote_levels)
 
     def _on_add_source_clicked(self, _matrix):
         dialog = AddSourceDialog(
@@ -1687,6 +1701,58 @@ class WaveXLRWindow(Adw.ApplicationWindow):
             source_id, volume, self._sources.get(source_id, {}).get("muted", False))
         sources_module.save(self._sources)
 
+    def toggle_fx(self, source_id, effect):
+        """Flip one effect from the remote surface. Returns the new value.
+
+        The toggles a deck key can honestly draw as an LED: lowcut flips
+        between off and 80 Hz (the popover still offers 120), gate, comp
+        and mono flip their booleans. Threshold-shaped settings are not
+        toggles and stay with the popover and the calibrator.
+        """
+        source = self._sources.get(source_id)
+        if source is None or sources_module.kind(source) \
+                != sources_module.KIND_DEVICE:
+            return None
+        fx = sources_module.fx(source)
+        if effect == "lowcut":
+            fx["lowcut"] = 0 if fx["lowcut"] else 80
+            new = fx["lowcut"]
+        elif effect in ("gate", "comp", "mono"):
+            fx[effect] = not fx[effect]
+            new = fx[effect]
+        else:
+            return None
+        source["fx"] = fx
+        cell = self.matrix.source(source_id)
+        if cell is not None:
+            cell.set_fx(fx)
+        sources_module.save(self._sources)
+        self.mixer.set_sources(self._sources)
+        self._push_remote_state()
+        return new
+
+    def _push_remote_state(self):
+        """Refresh the published states soon, once, however many changes.
+
+        This is what turns the remote surface from poll-only into push:
+        set_state on a stateful action emits org.gtk.Actions.Changed, so a
+        subscribed deck redraws the moment the mixer moves — from this
+        window, the hardware button, a scene, anything — instead of on a
+        timer. Debounced because a slider drag is dozens of changes and
+        one Changed per gesture is what a subscriber wants.
+        """
+        if self._push_id is not None:
+            return
+
+        def _fire():
+            self._push_id = None
+            app = self.get_application()
+            if app is not None:
+                app.push_states()
+            return GLib.SOURCE_REMOVE
+
+        self._push_id = GLib.timeout_add(150, _fire)
+
     def _on_fx_autotune(self, cell, source_id):
         """Two guided measurements, then gate and compressor set to fit.
 
@@ -1810,6 +1876,7 @@ class WaveXLRWindow(Adw.ApplicationWindow):
             source["fx"] = c.fx_settings()
             sources_module.save(self._sources)
             self.mixer.set_sources(self._sources)
+            self._push_remote_state()
             return GLib.SOURCE_REMOVE
 
         self._fx_debounce_ids[source_id] = GLib.timeout_add(
@@ -1823,6 +1890,7 @@ class WaveXLRWindow(Adw.ApplicationWindow):
             self._enforce_exclusive_group(source_id)
         sources_module.save(self._sources)
         self._notify_tray()
+        self._push_remote_state()
 
     def _on_group_sources_clicked(self, _matrix, dragged_id, target_id):
         """Put the dragged source in the target's group.
@@ -1896,6 +1964,7 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         self.mixer.set_source_level(source_id, level,
                                     source.get("muted", False))
         sources_module.save(self._sources)
+        self._push_remote_state()
         return True
 
     # How each protocol profile's hardware names its capture node. Used to
@@ -1980,6 +2049,7 @@ class WaveXLRWindow(Adw.ApplicationWindow):
             self._enforce_exclusive_group(source_id)
         sources_module.save(self._sources)
         self._notify_tray()
+        self._push_remote_state()
         return muted
 
     def set_cell_volume(self, source_id, mix_id, volume):
@@ -1999,6 +2069,7 @@ class WaveXLRWindow(Adw.ApplicationWindow):
             cell.set_volume(volume)
         self.mixer.set_cell(source_id, mix_id, volume, current["muted"])
         self._refresh_mix_emptiness()
+        self._push_remote_state()
         return True
 
     def toggle_cell_mute(self, source_id, mix_id):
@@ -2012,6 +2083,7 @@ class WaveXLRWindow(Adw.ApplicationWindow):
             cell.set_muted(muted)
         self.mixer.set_cell(source_id, mix_id, current["volume"], muted)
         self._refresh_mix_emptiness()
+        self._push_remote_state()
         return muted
 
     # --- Scenes -----------------------------------------------------------
@@ -2031,6 +2103,7 @@ class WaveXLRWindow(Adw.ApplicationWindow):
             payload["hardware"] = hardware
         sid = scenes_module.put(name.strip(), payload)
         self._rebuild_scene_menu()
+        self._push_remote_state()
         return sid
 
     def apply_scene(self, sid):
@@ -2076,12 +2149,14 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         self._refresh_mix_emptiness()
         if skipped:
             logging.info("scene %s: skipped %s", sid, ", ".join(skipped))
+        self._push_remote_state()
         return skipped
 
     def delete_scene(self, sid):
         removed = scenes_module.remove(sid)
         if removed:
             self._rebuild_scene_menu()
+            self._push_remote_state()
         return removed
 
     def _hardware_scene_state(self):
@@ -2210,6 +2285,9 @@ class WaveXLRWindow(Adw.ApplicationWindow):
                     "muted": bool(source.get("muted", False)),
                     "group": sources_module.group(source),
                     "kind": sources_module.kind(source),
+                    # The DSP settings ride along so a remote control can
+                    # draw an fx toggle's LED without a second call.
+                    "fx": sources_module.fx(source),
                 }
                 for sid, source in self._sources.items()
             ],
@@ -2271,6 +2349,7 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         self._sync_hw_mute(target, False)
         self._enforce_exclusive_group(target_id)
         sources_module.save(self._sources)
+        self._push_remote_state()
 
     def _enforce_exclusive_group(self, active_id):
         """Leave only one source in a group unmuted.
@@ -2518,6 +2597,17 @@ class WaveXLRApp(Adw.Application):
         scenes_state.connect("activate", self._action_refresh_scenes)
         self.add_action(scenes_state)
 
+        levels = Gio.SimpleAction.new_stateful(
+            "levels", None, GLib.Variant("s", "{}"),
+        )
+        levels.connect("activate", self._action_refresh_levels)
+        self.add_action(levels)
+
+        toggle_fx = Gio.SimpleAction.new(
+            "toggle-fx", GLib.VariantType.new("(ss)"))
+        toggle_fx.connect("activate", self._action_toggle_fx)
+        self.add_action(toggle_fx)
+
     def _action_switch_group(self, _action, parameter):
         if self._window is None or parameter is None:
             return
@@ -2623,6 +2713,55 @@ class WaveXLRApp(Adw.Application):
                 "s", json.dumps(self._window.scene_names())))
         except Exception:                                   # noqa: BLE001
             logging.exception("scenes failed")
+
+    def _action_refresh_levels(self, action, _parameter):
+        """State: every live meter's latest peak, {src:<id>|mix:<id>: 0..1}."""
+        if self._window is None:
+            return
+        try:
+            action.set_state(GLib.Variant("s", self._window.remote_levels()))
+        except Exception:                                   # noqa: BLE001
+            logging.exception("levels failed")
+
+    def _action_toggle_fx(self, _action, parameter):
+        if self._window is None or parameter is None:
+            return
+        source_id, effect = parameter.unpack()
+        try:
+            self._window.toggle_fx(source_id, effect)
+        except Exception:                                   # noqa: BLE001
+            logging.exception("toggle-fx failed")
+
+    def push_states(self):
+        """Recompute every published state so subscribers hear Changed.
+
+        The read-only actions were poll-only — Activate refreshed, Describe
+        read. Pushing the same states when the mixer actually moves lets a
+        remote subscribe instead of poll; the poll contract still holds for
+        clients that prefer it. Levels are deliberately NOT pushed: they
+        move fifteen times a second per meter, and a bus broadcast at that
+        rate serves nobody — a remote polls them only while a meter-bearing
+        control is on screen.
+        """
+        if self._window is None:
+            return
+        for name, value in (
+            ("snapshot", self._window.remote_snapshot()),
+            ("scenes", json.dumps(self._window.scene_names())),
+        ):
+            action = self.lookup_action(name)
+            if action is not None:
+                try:
+                    action.set_state(GLib.Variant("s", value))
+                except Exception:                           # noqa: BLE001
+                    logging.exception("push of %s failed", name)
+        groups = self.lookup_action("source-groups")
+        if groups is not None:
+            try:
+                groups.set_state(
+                    GLib.Variant("as", self._window.source_groups()))
+            except Exception:                               # noqa: BLE001
+                logging.exception("push of source-groups failed")
 
     def do_command_line(self, command_line):
         options = command_line.get_options_dict()
