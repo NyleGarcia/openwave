@@ -33,6 +33,19 @@ class RenderConfig(unittest.TestCase):
         # sequential chain: every adjacent pair is linked
         self.assertIn('output = "hp:Out" input = "eql:In"', conf)
 
+    def test_gate_and_compressor_are_ladspa_nodes_in_strip_order(self):
+        conf = mixer_mod.render_fx_config(_dev_source(
+            lowcut=80, gate=True, gate_thresh=-45.0,
+            comp=True, comp_thresh=-20.0, comp_ratio=4.0))
+        self.assertIn("type = ladspa", conf)
+        self.assertIn('plugin = "gate_1410"', conf)
+        self.assertIn('"Threshold (dB)" = -45.0', conf)
+        self.assertIn('plugin = "sc4m_1916"', conf)
+        self.assertIn('"Ratio (1:n)" = 4.0', conf)
+        # channel-strip order: cut, gate, compress
+        self.assertIn('output = "hp:Out" input = "gate:In"', conf)
+        self.assertIn('output = "gate:Out" input = "comp:In"', conf)
+
     def test_neutral_plus_mono_is_a_bare_copy(self):
         conf = mixer_mod.render_fx_config(_dev_source(mono=True))
         self.assertIn("label = copy", conf)
@@ -96,6 +109,33 @@ class Lifecycle(unittest.TestCase):
                       "the cell loopback must link from the fx node, "
                       "not the raw device")
         self.assertNotIn(("ports", "-o", ARCTIS), self.pw.calls)
+
+    def test_a_dying_chain_does_not_respawn_loop(self):
+        """A missing LADSPA library kills the chain instantly; respawning
+        every reconcile would fork a corpse every two seconds forever."""
+        self.mx._sources["dock"]["fx"] = {"gate": True}
+        self.mx._reconcile_fx("dock")
+        self._fx_procs()[0].dies()
+        self.mx._reconcile_fx("dock")
+        self.assertEqual(len(self._fx_procs()), 1, "no respawn after death")
+        self.mx._reconcile_fx("dock")
+        self.assertEqual(len(self._fx_procs()), 1)
+        # a settings change is consent to try again
+        self.mx._sources["dock"]["fx"] = {"gate": True, "lowcut": 80}
+        self.mx._reconcile_fx("dock")
+        self.assertEqual(len(self._fx_procs()), 2)
+
+    def test_a_reaped_corpse_still_reads_as_death(self):
+        """_reap_dead collects dead children before the fx pass looks, so
+        an absent proc under a known config is the failure, not a fresh
+        start — treating it as fresh was a slow respawn loop."""
+        self.mx._sources["dock"]["fx"] = {"gate": True}
+        self.mx._reconcile_fx("dock")
+        self._fx_procs()[0].dies()
+        self.mx._procs.pop(self.mx._fx_key("dock"))  # what _reap_dead does
+        self.mx._reconcile_fx("dock")
+        self.assertEqual(len(self._fx_procs()), 1, "no respawn after reap")
+        self.assertIn("dock", self.mx._fx_failed)
 
     def test_replug_tears_the_chain_down_for_respawn(self):
         self.mx._reconcile_fx("dock")

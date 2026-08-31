@@ -222,6 +222,11 @@ def new_device_source(*, name, node_name, icon_name=DEFAULT_DEVICE_ICON):
 # fx_active() is the single definition of whether a chain is needed at all.
 DEFAULT_FX = {
     "lowcut": 0,          # Hz: 0 (off), 80 or 120
+    "gate": False,        # noise gate (LADSPA swh gate)
+    "gate_thresh": -50.0,  # dB the gate opens at
+    "comp": False,        # compressor (LADSPA swh sc4m)
+    "comp_thresh": -18.0,  # dB compression starts at
+    "comp_ratio": 3.0,    # 1:n above threshold
     "eq_low": 0.0,        # dB, low shelf @ 100 Hz
     "eq_mid": 0.0,        # dB, peaking @ 1 kHz
     "eq_high": 0.0,       # dB, high shelf @ 8 kHz
@@ -245,6 +250,7 @@ def fx_active(source):
     f = fx(source)
     return bool(
         f["lowcut"]
+        or f["gate"] or f["comp"]
         or f["eq_low"] or f["eq_mid"] or f["eq_high"]
         or f["delay_ms"]
         or f["mono"]

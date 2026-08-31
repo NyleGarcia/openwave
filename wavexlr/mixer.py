@@ -103,6 +103,28 @@ def render_fx_config(source):
     if f["lowcut"]:
         nodes.append(("hp", "bq_highpass",
                       f'control = {{ "Freq" = {float(f["lowcut"]):.1f} }}'))
+    # Gate before compressor, both before tone: standard channel-strip
+    # order — gate on the raw dynamics, compress what survives, then EQ.
+    # These two are LADSPA (swh-plugins); a missing library kills the
+    # chain's process, which _reconcile_fx turns into one logged warning
+    # and a fallback to the raw device rather than a respawn loop.
+    if f["gate"]:
+        nodes.append((
+            "gate", "ladspa/gate",
+            'plugin = "gate_1410" '
+            f'control = {{ "Threshold (dB)" = {float(f["gate_thresh"]):.1f} '
+            '"Attack (ms)" = 10.0 "Hold (ms)" = 120.0 "Decay (ms)" = 150.0 '
+            '"Range (dB)" = -70.0 "LF key filter (Hz)" = 30.8 '
+            '"HF key filter (Hz)" = 23000.0 "Output select" = 0.0 }'))
+    if f["comp"]:
+        nodes.append((
+            "comp", "ladspa/sc4m",
+            'plugin = "sc4m_1916" '
+            f'control = {{ "Threshold level (dB)" = {float(f["comp_thresh"]):.1f} '
+            f'"Ratio (1:n)" = {float(f["comp_ratio"]):.1f} '
+            '"RMS/peak" = 0.0 "Attack time (ms)" = 15.0 '
+            '"Release time (ms)" = 150.0 "Knee radius (dB)" = 3.0 '
+            '"Makeup gain (dB)" = 0.0 }'))
     if f["eq_low"]:
         nodes.append(("eql", "bq_lowshelf",
                       f'control = {{ "Freq" = 100.0 "Gain" = {float(f["eq_low"]):.1f} }}'))
@@ -120,11 +142,14 @@ def render_fx_config(source):
     if not nodes:
         nodes.append(("thru", "copy", ""))
 
-    node_lines = "\n".join(
-        f'                    {{ type = builtin name = {name} '
-        f'label = {label} {extra} }}'
-        for name, label, extra in nodes
-    )
+    def _node_line(name, label, extra):
+        if label.startswith("ladspa/"):
+            return (f'                    {{ type = ladspa name = {name} '
+                    f'label = {label.split("/", 1)[1]} {extra} }}')
+        return (f'                    {{ type = builtin name = {name} '
+                f'label = {label} {extra} }}')
+
+    node_lines = "\n".join(_node_line(*n) for n in nodes)
     link_lines = "\n".join(
         f'                    {{ output = "{a[0]}:Out" input = "{b[0]}:In" }}'
         for a, b in zip(nodes, nodes[1:])
@@ -853,6 +878,7 @@ class Mixer:
         self._lock = Lock()
         self._procs = {}
         self._fx_conf = {}   # source_id -> rendered fx config, for respawn diff
+        self._fx_failed = {}  # source_id -> config a chain died under
         self._state = self._load_state()
         if self._migrate_state():
             self._save_state()
@@ -1347,6 +1373,23 @@ class Mixer:
             self._streams = new
         if added or removed:
             self._enqueue(("poll",), self._reconcile_all)
+        else:
+            # A quiet graph still needs the fx chains health-checked: a
+            # chain that died (missing plugin, crash) would otherwise wait
+            # for an unrelated stream event before anyone noticed — the
+            # warning and the raw-device fallback both live in that pass.
+            dead = [
+                sid for sid in list(self._fx_conf)
+                if sid not in self._fx_failed
+                and ((p := self._procs.get(self._fx_key(sid))) is None
+                     or p.poll() is not None)
+            ]
+            if dead:
+                self._enqueue(
+                    ("fx-health",),
+                    lambda sids=tuple(dead): [
+                        self._reconcile_fx(s) for s in sids],
+                )
         return added, removed
     # ------------------------------------------------------------ volumes
     def _volumes(self):
@@ -1620,6 +1663,7 @@ class Mixer:
             # so the reconcile respawns it against the reincarnation.
             self._destroy_loopback(self._fx_key(sid))
             self._fx_conf.pop(sid, None)
+            self._fx_failed.pop(sid, None)
 
     def request_capture_poll(self):
         """Re-snapshot capture devices on the worker, reconciling if it moved.
@@ -1923,10 +1967,27 @@ class Mixer:
             self._fx_conf.pop(source_id, None)
             return
         conf = render_fx_config(source)
+        if self._fx_failed.get(source_id) == conf:
+            return  # died under exactly these settings; wait for a change
         proc = self._procs.get(key)
-        if proc is not None and proc.poll() is None \
-                and self._fx_conf.get(source_id) == conf:
+        if self._fx_conf.get(source_id) == conf:
+            if proc is not None and proc.poll() is None:
+                return
+            # The chain we spawned for exactly these settings is gone — a
+            # bad config or a missing plugin — and _reap_dead may already
+            # have collected the corpse, which is why "proc is None" with a
+            # known config is death too, not "never spawned". Respawning
+            # would loop it every reconcile; remember the settings, say why
+            # once, fall back to the raw device (cell targeting checks
+            # chain liveness).
+            self._fx_failed[source_id] = conf
+            hint = (" — a LADSPA plugin is missing; install swh-plugins"
+                    if "type = ladspa" in conf else "")
+            _log.warning("fx chain for %s exited; running without effects%s",
+                         source.get("name", source_id), hint)
+            self._destroy_loopback(key)
             return
+        self._fx_failed.pop(source_id, None)
         self._destroy_loopback(key)
         path = fx_config_path(source_id)
         os.makedirs(os.path.dirname(path), exist_ok=True)

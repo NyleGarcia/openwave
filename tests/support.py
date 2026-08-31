@@ -65,6 +65,7 @@ def bare_mixer(**attrs):
     # so a test can call the real entry points and inspect the state they
     # persisted without a subprocess ever being spawned.
     mx._fx_conf = {}
+    mx._fx_failed = {}
     mx._pending = {}
     mx._pending_lock = threading.Lock()
     mx._wake = threading.Event()

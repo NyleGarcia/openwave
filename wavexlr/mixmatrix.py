@@ -974,6 +974,39 @@ class SourceCell(Gtk.Box):
         self._fx_lowcut.connect("notify::selected", self._on_fx_changed)
         row("Low cut", self._fx_lowcut)
 
+        def switch():
+            s = Gtk.Switch(halign=Gtk.Align.START, valign=Gtk.Align.CENTER)
+            s.connect("notify::active", self._on_fx_changed)
+            return s
+
+        def scale(lo, hi, step, digits=0):
+            s = Gtk.Scale(
+                orientation=Gtk.Orientation.HORIZONTAL,
+                draw_value=True, digits=digits,
+                adjustment=Gtk.Adjustment(
+                    lower=lo, upper=hi, step_increment=step,
+                    page_increment=step * 5),
+                hexpand=True,
+            )
+            s.set_size_request(160, -1)
+            s.connect("value-changed", self._on_fx_changed)
+            return s
+
+        # Gate and compressor need swh-plugins; when the library is
+        # missing the chain falls back to the raw device and the log says
+        # which package to install.
+        self._fx_gate = switch()
+        row("Gate", self._fx_gate)
+        self._fx_gate_thresh = scale(-70, -20, 1)
+        row("Gate dB", self._fx_gate_thresh)
+
+        self._fx_comp = switch()
+        row("Comp", self._fx_comp)
+        self._fx_comp_thresh = scale(-40, 0, 1)
+        row("Comp dB", self._fx_comp_thresh)
+        self._fx_comp_ratio = scale(1, 10, 0.5, digits=1)
+        row("Ratio", self._fx_comp_ratio)
+
         def eq_scale():
             s = Gtk.Scale(
                 orientation=Gtk.Orientation.HORIZONTAL,
@@ -1020,6 +1053,11 @@ class SourceCell(Gtk.Box):
         lowcut = (0, 80, 120)[self._fx_lowcut.get_selected()]
         return {
             "lowcut": lowcut,
+            "gate": bool(self._fx_gate.get_active()),
+            "gate_thresh": float(self._fx_gate_thresh.get_value()),
+            "comp": bool(self._fx_comp.get_active()),
+            "comp_thresh": float(self._fx_comp_thresh.get_value()),
+            "comp_ratio": float(self._fx_comp_ratio.get_value()),
             "eq_low": float(self._fx_eq_low.get_value()),
             "eq_mid": float(self._fx_eq_mid.get_value()),
             "eq_high": float(self._fx_eq_high.get_value()),
@@ -1035,6 +1073,11 @@ class SourceCell(Gtk.Box):
         try:
             self._fx_lowcut.set_selected(
                 {0: 0, 80: 1, 120: 2}.get(int(fx.get("lowcut", 0)), 0))
+            self._fx_gate.set_active(bool(fx.get("gate", False)))
+            self._fx_gate_thresh.set_value(fx.get("gate_thresh", -50.0))
+            self._fx_comp.set_active(bool(fx.get("comp", False)))
+            self._fx_comp_thresh.set_value(fx.get("comp_thresh", -18.0))
+            self._fx_comp_ratio.set_value(fx.get("comp_ratio", 3.0))
             self._fx_eq_low.set_value(fx.get("eq_low", 0.0))
             self._fx_eq_mid.set_value(fx.get("eq_mid", 0.0))
             self._fx_eq_high.set_value(fx.get("eq_high", 0.0))
