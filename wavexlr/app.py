@@ -1729,16 +1729,19 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         prog.choose(self, None, _on_cancel)
 
         def _work():
-            floor = calibrate.capture_window_peaks_db(
-                node, calibrate.FLOOR_SECONDS)
+            floor_m = calibrate.metrics_from_raw(
+                calibrate.capture_raw(node, calibrate.FLOOR_SECONDS))
             if state["cancelled"]:
                 return None
             GLib.idle_add(prog.set_body, "🗣  Now speak normally…")
-            speech = calibrate.capture_window_peaks_db(
-                node, calibrate.SPEECH_SECONDS)
+            speech_m = calibrate.metrics_from_raw(
+                calibrate.capture_raw(node, calibrate.SPEECH_SECONDS))
             if state["cancelled"]:
                 return None
-            return calibrate.analyze(floor, speech)
+            result = calibrate.analyze(
+                floor_m["peaks_db"], speech_m["peaks_db"])
+            result["fx"].update(calibrate.analyze_tone(floor_m, speech_m))
+            return result
 
         def _done(result):
             prog.force_close()
@@ -1752,13 +1755,19 @@ class WaveXLRWindow(Adw.ApplicationWindow):
             sources_module.save(self._sources)
             self.mixer.set_sources(self._sources)
             m, f = result["measured"], result["fx"]
+            tone = f"Low cut {f.get('lowcut', 0)} Hz"
+            if f.get("eq_high"):
+                tone += f", high shelf {f['eq_high']:+.0f} dB"
+            if f.get("mono"):
+                tone += ", forced mono (one-sided capture)"
             report = Adw.AlertDialog(
                 heading="Calibrated",
                 body=(f"Noise floor: {m['floor_db']} dBFS\n"
                       f"Voice: {m['quiet_voice_db']} to "
                       f"{m['loud_voice_db']} dBFS\n\n"
                       f"Gate set to {f['gate_thresh']} dB, compressor to "
-                      f"{f['comp_thresh']} dB at {f['comp_ratio']:.0f}:1."),
+                      f"{f['comp_thresh']} dB at {f['comp_ratio']:.0f}:1.\n"
+                      f"{tone}."),
             )
             report.add_response("ok", "OK")
             report.choose(self, None, lambda d, r: d.choose_finish(r))
