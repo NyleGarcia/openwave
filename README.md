@@ -99,6 +99,12 @@ all, so on that hardware the app is the only way to switch it.
 - **System integration** — mute and volumes sync bidirectionally with
   PipeWire/ALSA, with ALSA controls discovered by name so a firmware revision
   that renumbers them cannot break it.
+- **Per-microphone effects** — each capture row carries a DSP popover:
+  low cut (80/120 Hz), three-band tone EQ, alignment delay (sync your
+  mic to desktop audio in a recording), and forced mono. Built from
+  PipeWire's own filter-chain — nothing to install, no process running
+  while everything is neutral. Gate, compressor and AI noise removal are
+  on the roadmap as optional plugins.
 - **Hotplug** — a Wave plugged in after launch is picked up automatically.
 - **Multiple devices** — every connected Wave is opened, polled and
   ALSA-synced at once, two of the same model included (told apart by USB

@@ -217,6 +217,40 @@ def new_device_source(*, name, node_name, icon_name=DEFAULT_DEVICE_ICON):
     }
 
 
+# Per-source DSP settings, stored on the source record because they are
+# source identity like trim. Neutral values mean "this effect is off";
+# fx_active() is the single definition of whether a chain is needed at all.
+DEFAULT_FX = {
+    "lowcut": 0,          # Hz: 0 (off), 80 or 120
+    "eq_low": 0.0,        # dB, low shelf @ 100 Hz
+    "eq_mid": 0.0,        # dB, peaking @ 1 kHz
+    "eq_high": 0.0,       # dB, high shelf @ 8 kHz
+    "delay_ms": 0,        # alignment delay
+    "mono": False,        # force centered mono
+}
+
+
+def fx(source):
+    """A source's DSP settings, defaults filled in."""
+    stored = (source or {}).get("fx") or {}
+    return {**DEFAULT_FX, **stored}
+
+
+def fx_active(source):
+    """Whether any effect departs from neutral — the chain exists only then.
+
+    Neutral settings spawn nothing: a pass-through filter node would cost a
+    process and a resample for silence-shaped benefit.
+    """
+    f = fx(source)
+    return bool(
+        f["lowcut"]
+        or f["eq_low"] or f["eq_mid"] or f["eq_high"]
+        or f["delay_ms"]
+        or f["mono"]
+    )
+
+
 def add(sources, source):
     sources[source["id"]] = source
     save(sources)

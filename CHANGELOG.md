@@ -13,6 +13,14 @@ versions are git tags (see [Releases](../../releases)).
   connected, the capture-fix daemon keeps one keepalive pin per device,
   scenes record hardware state per serial number, and the tray reports
   muted when any device's hardware mute is down.
+- **Per-microphone DSP chain**: every capture row gains an effects
+  popover — low cut (80/120 Hz), three-band presence EQ, alignment
+  delay up to 500 ms, and forced mono — built from PipeWire's builtin
+  filter-chain plugins, zero new dependencies. Each active chain is one
+  `pipewire -c` child publishing a virtual Source the row's cells drink
+  from; neutral settings hold no process at all. Verified on hardware:
+  a 120 Hz low cut measured 10 dB of relative low-end removal at the
+  chain's output.
 - **Mix master sliders and output meters**: every mix column header now
   carries its master volume slider (throttled, and following external
   moves — pavucontrol, media keys, scenes — within a couple of seconds)

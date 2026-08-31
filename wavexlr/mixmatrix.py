@@ -773,6 +773,8 @@ class SourceCell(Gtk.Box):
         # Make this the live source in its group
         "switch-clicked": (GObject.SignalFlags.RUN_FIRST, None, ()),
         "edit-clicked": (GObject.SignalFlags.RUN_FIRST, None, ()),
+        # DSP popover moved; read the values back with fx_settings()
+        "fx-changed": (GObject.SignalFlags.RUN_FIRST, None, ()),
     }
 
     def __init__(self, *, name, icon_name, has_level, removable=False,
@@ -907,6 +909,18 @@ class SourceCell(Gtk.Box):
             self._level.add_offset_value(Gtk.LEVEL_BAR_OFFSET_FULL, 1.00)
             inner.append(self._level)
 
+        self._fx_widgets = None
+        if is_capture:
+            fx_btn = Gtk.MenuButton(
+                icon_name="preferences-color-symbolic",
+                valign=Gtk.Align.CENTER,
+                tooltip_text="Effects (low cut, EQ, delay)",
+            )
+            fx_btn.add_css_class("flat")
+            fx_btn.add_css_class("circular")
+            fx_btn.set_popover(self._build_fx_popover())
+            inner.append(fx_btn)
+
         if editable:
             edit_btn = Gtk.Button(
                 icon_name="document-edit-symbolic",
@@ -930,6 +944,104 @@ class SourceCell(Gtk.Box):
             self._remove_btn.connect(
                 "clicked", lambda _: self.emit("remove-clicked"))
             inner.append(self._remove_btn)
+
+    __FX_SIGNAL = "fx-changed"
+
+    def _build_fx_popover(self):
+        """The per-microphone DSP controls: low cut, tone, delay, mono.
+
+        Widgets are the state; fx_settings() reads them and set_fx() writes
+        them with signals blocked, mirroring how every other control here
+        round-trips. Emission is per-gesture — the app debounces the
+        respawn, not the popover.
+        """
+        pop = Gtk.Popover()
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8,
+                      margin_top=12, margin_bottom=12,
+                      margin_start=12, margin_end=12)
+        pop.set_child(box)
+
+        def row(label, widget):
+            r = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+            lbl = Gtk.Label(label=label, xalign=0)
+            lbl.set_width_chars(9)
+            r.append(lbl)
+            r.append(widget)
+            box.append(r)
+
+        self._fx_lowcut = Gtk.DropDown.new_from_strings(
+            ["Off", "80 Hz", "120 Hz"])
+        self._fx_lowcut.connect("notify::selected", self._on_fx_changed)
+        row("Low cut", self._fx_lowcut)
+
+        def eq_scale():
+            s = Gtk.Scale(
+                orientation=Gtk.Orientation.HORIZONTAL,
+                draw_value=True, digits=0,
+                adjustment=Gtk.Adjustment(
+                    lower=-12, upper=12, step_increment=1, page_increment=3),
+                hexpand=True,
+            )
+            s.set_size_request(160, -1)
+            s.add_mark(0, Gtk.PositionType.BOTTOM, None)
+            s.connect("value-changed", self._on_fx_changed)
+            return s
+
+        self._fx_eq_low = eq_scale()
+        self._fx_eq_mid = eq_scale()
+        self._fx_eq_high = eq_scale()
+        row("Low dB", self._fx_eq_low)
+        row("Mid dB", self._fx_eq_mid)
+        row("High dB", self._fx_eq_high)
+
+        self._fx_delay = Gtk.SpinButton(
+            adjustment=Gtk.Adjustment(
+                lower=0, upper=500, step_increment=5, page_increment=25),
+            climb_rate=1, digits=0,
+        )
+        self._fx_delay.connect("value-changed", self._on_fx_changed)
+        row("Delay ms", self._fx_delay)
+
+        self._fx_mono = Gtk.Switch(halign=Gtk.Align.START,
+                                   valign=Gtk.Align.CENTER)
+        self._fx_mono.connect("notify::active", self._on_fx_changed)
+        row("Mono", self._fx_mono)
+
+        self._fx_updating = False
+        return pop
+
+    def _on_fx_changed(self, *_args):
+        if getattr(self, "_fx_updating", False):
+            return
+        self.emit(self.__FX_SIGNAL)
+
+    def fx_settings(self):
+        """The popover's current values, in the sources.DEFAULT_FX shape."""
+        lowcut = (0, 80, 120)[self._fx_lowcut.get_selected()]
+        return {
+            "lowcut": lowcut,
+            "eq_low": float(self._fx_eq_low.get_value()),
+            "eq_mid": float(self._fx_eq_mid.get_value()),
+            "eq_high": float(self._fx_eq_high.get_value()),
+            "delay_ms": int(self._fx_delay.get_value()),
+            "mono": bool(self._fx_mono.get_active()),
+        }
+
+    def set_fx(self, fx):
+        """Load stored settings into the popover without emitting."""
+        if self._fx_widgets is None and not hasattr(self, "_fx_lowcut"):
+            return
+        self._fx_updating = True
+        try:
+            self._fx_lowcut.set_selected(
+                {0: 0, 80: 1, 120: 2}.get(int(fx.get("lowcut", 0)), 0))
+            self._fx_eq_low.set_value(fx.get("eq_low", 0.0))
+            self._fx_eq_mid.set_value(fx.get("eq_mid", 0.0))
+            self._fx_eq_high.set_value(fx.get("eq_high", 0.0))
+            self._fx_delay.set_value(fx.get("delay_ms", 0))
+            self._fx_mono.set_active(bool(fx.get("mono", False)))
+        finally:
+            self._fx_updating = False
 
     def set_removable(self, removable, tooltip="Remove source"):
         """Show or hide the remove button on a row that owns one.

@@ -80,6 +80,7 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         # Debounce slider events to coalesce a flurry of value-changed signals
         # during a drag into one set_cell. {(source_id, mix_id): timeout_id}.
         self._cell_debounce_ids = {}
+        self._fx_debounce_ids = {}
         # One-shot re-read of the routing after a mix output change settles.
         self._output_refresh_id = None
         self._sources = sources_module.load_seeded()
@@ -1659,8 +1660,12 @@ class WaveXLRWindow(Adw.ApplicationWindow):
             return
         # Protected device rows carry a remove button that starts hidden;
         # the presence tick shows it only while the device is unplugged.
-        if sources_module.is_protected(self._sources.get(source_id, {})):
+        source = self._sources.get(source_id, {})
+        if sources_module.is_protected(source):
             cell.set_removable(False)
+        if sources_module.kind(source) == sources_module.KIND_DEVICE:
+            cell.set_fx(sources_module.fx(source))
+            cell.connect("fx-changed", self._on_source_fx_changed, source_id)
         source = self._sources.get(source_id, {})
         cell.set_volume(float(source.get("level", 1.0)))
         cell.set_muted(bool(source.get("muted", False)))
@@ -1672,6 +1677,33 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         self.mixer.set_source_level(
             source_id, volume, self._sources.get(source_id, {}).get("muted", False))
         sources_module.save(self._sources)
+
+    _FX_DEBOUNCE_MS = 400
+
+    def _on_source_fx_changed(self, cell, source_id):
+        """Persist fx edits and respawn the chain, debounced per source.
+
+        Every popover gesture emits; a drag across an EQ scale is dozens
+        of emissions, and each respawn restarts a process. The store is
+        written when the timer fires, so a crash mid-drag loses 400 ms of
+        slider, not the chain.
+        """
+        prev = self._fx_debounce_ids.pop(source_id, None)
+        if prev is not None:
+            GLib.source_remove(prev)
+
+        def _apply(sid=source_id, c=cell):
+            self._fx_debounce_ids.pop(sid, None)
+            source = self._sources.get(sid)
+            if source is None:
+                return GLib.SOURCE_REMOVE
+            source["fx"] = c.fx_settings()
+            sources_module.save(self._sources)
+            self.mixer.set_sources(self._sources)
+            return GLib.SOURCE_REMOVE
+
+        self._fx_debounce_ids[source_id] = GLib.timeout_add(
+            self._FX_DEBOUNCE_MS, _apply)
 
     def _on_source_mute_toggled(self, _cell, muted, source_id):
         self.mixer.set_source_level(

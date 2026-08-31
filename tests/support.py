@@ -64,6 +64,7 @@ def bare_mixer(**attrs):
     # running. The queue is the seam: work lands in _pending and stays there,
     # so a test can call the real entry points and inspect the state they
     # persisted without a subprocess ever being spawned.
+    mx._fx_conf = {}
     mx._pending = {}
     mx._pending_lock = threading.Lock()
     mx._wake = threading.Event()
@@ -143,6 +144,7 @@ class FakePipeWire:
         self.calls.append(("wpctl",) + args)
 
     def ports(self, direction_flag, node_name):
+        self.calls.append(("ports", direction_flag, node_name))
         return self.port_map.get((direction_flag, node_name), [])
 
     def link(self, src_port, dst_port):
