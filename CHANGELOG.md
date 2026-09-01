@@ -6,6 +6,23 @@ versions are git tags (see [Releases](../../releases)).
 ## [Unreleased]
 
 ### Added
+- **Watchdogs for faults every byte-level check passes**: the daemon
+  now runs two slow health checks alongside the capture keepalive. A
+  glitch watch reads the profiler's per-node xrun counter (via
+  `pw-top`) and, on sustained accumulation — the robotic-mic fault,
+  measured at ~23 xruns/s — cycles the card to reopen the capture. A
+  stall watch compares each output sink's kernel `hw_ptr` between
+  windows and, when a running sink's hardware stops consuming — the
+  silent-output fault a WirePlumber restart can leave behind — suspends
+  and resumes the sink to reopen its PCM. Both remedies are
+  rate-limited (two attempts, 60 s cooldown, budget refilled on
+  recovery) so a genuinely broken device is left alone to be noticed.
+- **The Wave wins the graph-driver election**: the WirePlumber conf now
+  pins `priority.driver = 2500` on Wave nodes. All ALSA capture nodes
+  default to 2100 and a tie falls to the lowest object id, which handed
+  the graph clock to a wireless headset dongle whose jittery delivery
+  made the Wave's follower DLL resync ~23×/s — audibly robotic. The
+  Wave's wired iso clock is the stable one; let it drive.
 - **Multiple Wave devices at once**: every connected Wave — two of the
   same model included — is opened, polled at 10 Hz and ALSA-synced; a
   Device dropdown in the sidebar picks which one the controls drive, a

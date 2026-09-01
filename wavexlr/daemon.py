@@ -6,6 +6,7 @@ import time
 import sys
 
 from .audio import AudioManager
+from .health import HealthMonitor
 
 logging.basicConfig(level=logging.INFO, format="%(name)s: %(message)s")
 log = logging.getLogger("openwave.daemon")
@@ -31,8 +32,15 @@ def main():
     mgr = AudioManager(on_status_change=on_status)
     mgr.start()
 
+    # Slow watchdogs for the faults the keepalive cannot see: xrun
+    # accumulation (robotic capture) and a running sink whose hardware
+    # has stopped consuming (silent output).
+    health = HealthMonitor()
+    health.start()
+
     def shutdown(sig, frame):
         log.info("Shutting down")
+        health.stop()
         mgr.stop()
         sys.exit(0)
 
