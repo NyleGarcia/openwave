@@ -52,6 +52,7 @@ def bare_mixer(**attrs):
     mx._procs = {}
     mx._intakes = set()
     mx._live_captures = frozenset()
+    mx._capture_mutes = {}
     mx.mic = None
     mx.hp = None
     mx._started = False

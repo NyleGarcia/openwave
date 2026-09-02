@@ -198,6 +198,51 @@ def is_protected(source):
     return bool((source or {}).get("protected"))
 
 
+def hw_mute_changes(seen, hw_mutes, sources):
+    """Reconcile device rows with their devices' own ALSA-level mutes.
+
+    `seen` is the {node_name: muted} observed on the previous poll,
+    `hw_mutes` the current one, `sources` the full source table. Returns
+    ({node_name: muted} to remember as the new `seen`,
+     [(source_id, muted), ...] rows to move,
+     [(node_name, muted), ...] device mutes to write).
+
+    A row moves on an *edge* -- the device's mute changed between polls
+    and the row disagrees -- never on mere disagreement, because the
+    row's own mute writes travel the other way and a poll raced against
+    one would otherwise flip the click back. A device seen for the first
+    time syncs in the other direction: the row's state is deliberate
+    mixer state (a group hand-over muted the backup on purpose) while
+    the device's may be leftovers (a session manager restart restoring
+    a stale mute -- the muted-headset "mic isn't working" trap), so a
+    first-sight mismatch writes the row's mute to the device rather
+    than the device's to the row. From then on the button makes edges
+    and the row follows.
+    """
+    new_seen = {}
+    moves = []
+    writes = []
+    for source_id, source in sources.items():
+        if kind(source) != KIND_DEVICE:
+            continue
+        node = source.get("node_name")
+        if not node or node not in hw_mutes:
+            continue
+        muted = bool(hw_mutes[node])
+        row_muted = bool(source.get("muted", False))
+        prev = seen.get(node)
+        # Always remember what was *observed*, never what was written:
+        # remembering a write makes the next (possibly stale) snapshot
+        # read as an edge and undo it.
+        new_seen[node] = muted
+        if prev is None:
+            if row_muted != muted:
+                writes.append((node, row_muted))
+        elif prev != muted and row_muted != muted:
+            moves.append((source_id, muted))
+    return new_seen, moves, writes
+
+
 def new_device_source(*, name, node_name, icon_name=DEFAULT_DEVICE_ICON):
     """Return a fresh capture-device source bound to a PipeWire source node.
 

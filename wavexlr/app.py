@@ -64,6 +64,9 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         self.dev = WaveDevice()   # the selected device; one of self._devs
         self._devs = []           # every Wave held open, bus order
         self._any_hw_muted = False
+        # {node_name: muted} as of the previous capture poll — the memory
+        # hw_mute_changes needs to tell an edge from a disagreement.
+        self._capture_mute_seen = {}
         self._selector_updating = False
         self._gain_max = 0x5000
         self._updating_ui = False
@@ -908,6 +911,10 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         source_id, source = self._source_for_device(dev)
         if source is None or bool(source.get("muted", False)) == muted:
             return
+        self._apply_row_mute(source_id, source, muted)
+
+    def _apply_row_mute(self, source_id, source, muted):
+        """Move a source row to `muted` without driving the hardware back."""
         source["muted"] = muted
         self.mixer.set_source_level(source_id, source.get("level", 1.0), muted)
         cell = self.matrix.source(source_id)
@@ -1352,6 +1359,7 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         if check_devices:
             self._device_poll_countdown = self._DEVICE_POLL_EVERY
             self.mixer.request_capture_poll()
+            self._follow_capture_mutes()
         for source_id, source in list(self._sources.items()):
             if sources_module.kind(source) == sources_module.KIND_DEVICE:
                 if check_devices:
@@ -1368,6 +1376,36 @@ class WaveXLRWindow(Adw.ApplicationWindow):
                 self.matrix.set_mix_volume(mix_id, remembered[0])
         return True
 
+    def _follow_capture_mutes(self):
+        """Let a device's own mute button reach its matrix row.
+
+        The pactl side of what the USB poll does for open Waves: a headset's
+        hardware mute flips the source's ALSA mute and nothing downstream can
+        tell that silence from a quiet room — today's "mic isn't working".
+        Rows whose device we hold open over USB are excluded; their truth is
+        the firmware mute the 10 Hz poll already carries. Not through
+        _sync_hw_mute, same as _set_row_mute_from_hardware: the hardware is
+        already in the new state.
+        """
+        polled = {
+            sid: source for sid, source in self._sources.items()
+            if self._device_for_source(source) is None
+        }
+        self._capture_mute_seen, moves, writes = \
+            sources_module.hw_mute_changes(
+                self._capture_mute_seen, self.mixer.capture_mutes(), polled)
+        for source_id, muted in moves:
+            logging.info(
+                "%s: device mute %s outside the mixer; row follows",
+                self._sources[source_id].get("name", source_id),
+                "engaged" if muted else "cleared")
+            self._apply_row_mute(source_id, self._sources[source_id], muted)
+        for node, muted in writes:
+            logging.info(
+                "%s: device mute disagreed with its row at first sight; "
+                "row wins", node)
+            self.mixer.set_capture_mute(node, muted)
+
     def _check_capture_stall(self, source_id, source):
         """Reopen a capture device that enumerated but never started.
 
@@ -1379,6 +1417,11 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         node_name = source.get("node_name")
         present = node_name in self.mixer.live_captures()
         if not present:
+            self._stall_watch.forget(node_name)
+            return
+        if source.get("muted") or self.mixer.capture_mutes().get(node_name):
+            # A muted microphone is silent on purpose; cycling its card
+            # to cure that silence would only blink the audio.
             self._stall_watch.forget(node_name)
             return
         silent_for = self.meter.silent_for(source_id)
@@ -2011,10 +2054,19 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         """
         dev = self._device_for_source(source)
         if dev is None:
-            if source.get("node_name", "").find("Elgato") >= 0:
-                logging.warning(
-                    "row mute for %s: no open device matched, hardware "
-                    "mute not mirrored", source.get("name"))
+            # Not a Wave we hold open — but any capture device still has an
+            # ALSA-level mute of its own, and leaving it live under a muted
+            # row (or muted under a live one, the Arctis-headset trap) is
+            # the same lying mute button. pactl reaches what USB cannot.
+            node = source.get("node_name", "")
+            if sources_module.kind(source) == sources_module.KIND_DEVICE \
+                    and node:
+                self.mixer.set_capture_mute(node, muted)
+                if node.find("Elgato") >= 0:
+                    logging.warning(
+                        "row mute for %s: no open device matched, mirrored "
+                        "via pactl only (device LED will not follow)",
+                        source.get("name"))
             return
         self._usb_async(
             lambda: dev.set_mute(bool(muted)),

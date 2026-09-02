@@ -266,6 +266,43 @@ def _pactl_set_sink_mute(sink_name, muted):
     _run_quiet(["pactl", "set-sink-mute", sink_name, "1" if muted else "0"])
 
 
+def _pactl_source_mutes():
+    """{source_name: muted} for every source, in one call.
+
+    The device's own mute, not the matrix's: a headset mute button or
+    another mixer flips this without any stream changing, and a muted
+    source delivers digital silence that is indistinguishable from a
+    quiet room everywhere downstream. JSON for the same reason as
+    _pactl_sink_volumes -- the human listing is localised.
+    """
+    try:
+        result = subprocess.run(
+            ["pactl", "--format=json", "list", "sources"],
+            capture_output=True, text=True, timeout=5,
+        )
+    except (FileNotFoundError, subprocess.SubprocessError):
+        return {}
+    if result.returncode != 0:
+        return {}
+    try:
+        sources = json.loads(result.stdout)
+    except (ValueError, TypeError):
+        return {}
+    out = {}
+    for source in sources if isinstance(sources, list) else ():
+        if not isinstance(source, dict):
+            continue
+        name = source.get("name")
+        if name:
+            out[name] = bool(source.get("mute"))
+    return out
+
+
+def _pactl_set_source_mute(source_name, muted):
+    _run_quiet(["pactl", "set-source-mute", source_name,
+                "1" if muted else "0"])
+
+
 def _run_quiet(argv):
     try:
         subprocess.run(argv, capture_output=True, text=True, timeout=3)
@@ -356,6 +393,12 @@ class SubprocessPipeWire:
 
     def set_sink_mute(self, name, muted):
         _pactl_set_sink_mute(name, muted)
+
+    def source_mutes(self):
+        return _pactl_source_mutes()
+
+    def set_source_mute(self, name, muted):
+        _pactl_set_source_mute(name, muted)
 
     def move_stream(self, serial, sink_name):
         _move_stream(serial, sink_name)
@@ -903,6 +946,10 @@ class Mixer:
         # source can be wired at all. Always *rebound*, never mutated in
         # place, so a worker-thread read always sees one whole snapshot.
         self._live_captures = frozenset()
+        # {node_name: muted} for those same devices -- their own ALSA-level
+        # mute, refreshed alongside the presence snapshot and likewise
+        # rebound, never mutated.
+        self._capture_mutes = {}
         # Intake sinks we have created, so tearing one down costs no subprocess
         # when there was never one to tear down.
         self._intakes = set()
@@ -1625,6 +1672,24 @@ class Mixer:
         """
         return self._live_captures
 
+    def capture_mutes(self):
+        """{node_name: muted} snapshot of the capture devices' own mutes.
+
+        As stale as the last capture poll (~6 s): the reader wants edges,
+        not freshness -- a mute flipped by the device's own button between
+        two polls is still an edge on the next one.
+        """
+        return self._capture_mutes
+
+    def set_capture_mute(self, node_name, muted):
+        """Set a capture device's own ALSA-level mute, by node name.
+
+        pactl answers in single-digit milliseconds, so this stays on the
+        caller's thread like the sink-mute writes do.
+        """
+        if node_name:
+            self._pw.set_source_mute(node_name, bool(muted))
+
     def _refresh_live_captures(self):
         """Re-snapshot present capture devices. Returns (added, removed) names.
 
@@ -1640,9 +1705,12 @@ class Mixer:
         names = frozenset(source["name"] for source in list_capture_sources())
         if not names:
             return set(), set()
+        mutes = self._pw.source_mutes()
         with self._lock:
             previous = self._live_captures
             self._live_captures = names
+            self._capture_mutes = {n: m for n, m in mutes.items()
+                                   if n in names}
         return set(names) - set(previous), set(previous) - set(names)
 
     def poll_capture_devices(self):

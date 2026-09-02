@@ -6,6 +6,19 @@ versions are git tags (see [Releases](../../releases)).
 ## [Unreleased]
 
 ### Added
+- **Device mute buttons and the mixer tell one story**: a capture
+  device's own ALSA-level mute (a headset's hardware mute button, a
+  toggle in another mixer) now syncs with its matrix row in both
+  directions. Muting a device row also mutes the source via pactl —
+  the same mirror open Waves already get over USB — and the ~6 s
+  capture poll watches for the device's mute changing outside the
+  mixer and moves the row to match, on edges only so a poll can never
+  flip a fresh click back. At first sight the row wins instead — a
+  group hand-over's muted backup stays muted, and a stale mute a
+  session-manager restart left on the device (the "mic isn't working"
+  trap) is cleared to match the live row. The capture-stall watchdog
+  also learned that a muted microphone is silent on purpose and no
+  longer considers cycling its card.
 - **Watchdogs for faults every byte-level check passes**: the daemon
   now runs two slow health checks alongside the capture keepalive. A
   glitch watch reads the profiler's per-node xrun counter (via
