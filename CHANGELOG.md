@@ -5,6 +5,8 @@ versions are git tags (see [Releases](../../releases)).
 
 ## [Unreleased]
 
+## [1.2.0] — 2026-09-01
+
 ### Added
 - **Watchdogs that know when to stop**: a remedy budget now refills
   only after a sustained quiet stretch (5 min for the glitch watch,
