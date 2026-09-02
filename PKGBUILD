@@ -1,7 +1,7 @@
 # Maintainer: Zedwil <nylegarcia01@gmail.com>
 # Contributor: rikkichy
 pkgname=openwave
-pkgver=1.1.0
+pkgver=1.2.0
 pkgrel=1
 pkgdesc="The audio mixing matrix for Linux — per-app mixes, per-mix outputs, Elgato Wave control"
 arch=('any')
@@ -10,7 +10,7 @@ license=('MIT')
 depends=('python' 'python-gobject' 'gtk4' 'libadwaita' 'libusb' 'pipewire')
 optdepends=('python-xlib: friendly app names in the Add Source picker')
 source=("https://github.com/NyleGarcia/openwave/releases/download/v$pkgver/$pkgname-$pkgver.tar.gz")
-sha256sums=('9918ba4c70d685f6f2663390d07fe50f4f98cbb0104e502a91be0bc745322c6c')
+sha256sums=('5c2a500c7d70f1d31d087ab054916956b6acc905583081f7820029590cede466')
 
 check() {
     cd "$srcdir/$pkgname-$pkgver"
