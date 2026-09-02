@@ -467,7 +467,7 @@ wavexlr/
   wmnames.py  — Friendly app names via X11/XWayland (optional)
   service.py  — systemd/runit unit management
   paths.py    — Install-prefix resolution
-docs/         — architecture, hardware support, protocol, comparison
+docs/         — architecture, hardware support, protocol, troubleshooting
 tests/        — unit suite (no GTK, no PipeWire, no hardware needed)
 ```
 

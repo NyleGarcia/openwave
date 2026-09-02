@@ -6,6 +6,22 @@ versions are git tags (see [Releases](../../releases)).
 ## [Unreleased]
 
 ### Added
+- **Watchdogs that know when to stop**: a remedy budget now refills
+  only after a sustained quiet stretch (5 min for the glitch watch,
+  1 min of movement for the stall watch), not after a single clean
+  window — one quiet window is a card cycle settling, and refilling on
+  it turned a persistent fault into an audible pop every two minutes
+  on real hardware. The glitch watch also ignores muted captures
+  (muted delivers one inaudible xrun per graph cycle, forever, on
+  purpose) and baselines fresh on unmute. Logging grew up with it:
+  each fault announces itself once with the measured numbers, each
+  remedy carries its attempt count, giving up is said once with when
+  the watchdog re-arms, and re-arming is logged too.
+- **docs/troubleshooting.md**: field notes for the faults every
+  ordinary check passes — the xrun-diff method, driver-election
+  robotic mic, small-quantum crackle and the min-quantum floor,
+  frozen-hw_ptr silent output, and the muted-source
+  one-xrun-per-cycle signature.
 - **Device mute buttons and the mixer tell one story**: a capture
   device's own ALSA-level mute (a headset's hardware mute button, a
   toggle in another mixer) now syncs with its matrix row in both
