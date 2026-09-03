@@ -10,7 +10,7 @@ license=('MIT')
 depends=('python' 'python-gobject' 'gtk4' 'libadwaita' 'libusb' 'pipewire')
 optdepends=('python-xlib: friendly app names in the Add Source picker')
 source=("https://github.com/NyleGarcia/openwave/releases/download/v$pkgver/$pkgname-$pkgver.tar.gz")
-sha256sums=('43cc54eb803702311ebafbb6190d00054804c7593440dfd4021f0453c68faf9d')
+sha256sums=('eb4420a9dd9291ff0f794639e1ea46fb30f4140221e1aa7654a5dd7a471b023c')
 
 check() {
     cd "$srcdir/$pkgname-$pkgver"
