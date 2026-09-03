@@ -5,6 +5,46 @@ versions are git tags (see [Releases](../../releases)).
 
 ## [Unreleased]
 
+## [1.3.0] — 2026-09-03
+
+### Fixed
+- **The window survives being moved.** Everything that shells out now
+  runs on the mixer's worker instead of the GTK thread: the 2 s stream
+  tick's `pw-dump` and its two `pactl` passes over the mix masters, the
+  capture-stall card cycle (up to 15 s of `pactl`), the per-meter
+  `terminate`/`kill` waits, and the `pw-dump` each of output refresh,
+  source install and Elgato discovery used to pay for. A main loop
+  parked in a subprocess is a main loop not reading its Wayland socket,
+  and a scrolling tiling compositor moving a window emits configure and
+  enter/leave events fast enough to fill that socket and have the
+  client cut loose — the window vanishing mid-drag with no traceback
+  and no core dump behind it. Reported on niri; the same stall was
+  behind the UI's general stutter everywhere else.
+- **Signals no longer dismantle their own emitter.** The FX popover's
+  auto-calibrate button opened a dialog in the same frame as its
+  popover's teardown — a grab moving between a dying popup and a new
+  one, which on Wayland is a protocol error and an instant exit. The
+  row drop handler and the row move buttons had the same shape: both
+  ask for a reorder that destroys the very widget GTK is still
+  emitting from, while a `GtkWidgetPaintable` is still painting it.
+  All three now emit once the frame has unwound.
+- **A calibration can be stopped, and cannot hang.** The capture read
+  blocked on the pipe, so a node that went away mid-measure — an
+  unplugged microphone, a suspended device — parked the worker forever
+  behind a modal that could never be dismissed. Reads are polled with a
+  deadline, Cancel actually terminates `pw-cat` (it used to set a flag
+  read only between the two captures), the child carries the same
+  `pdeathsig` as every other child in the tree and is reaped rather
+  than merely signalled, and one calibration runs per row at a time.
+  The result lands on the row as it exists when the measurement
+  finishes rather than the one captured ten seconds earlier, and it
+  reaches the remote surface like every other effects change.
+- **Shutdown lets go cleanly.** Every timer the window owns is disarmed
+  (only the 10 Hz USB poll was), and in-flight background workers are
+  given a bounded chance to finish before the USB handle closes —
+  closing the device under a worker, then finalizing the interpreter
+  while it is still inside libusb, is a crash on the way out.
+
 ## [1.2.0] — 2026-09-01
 
 ### Added
