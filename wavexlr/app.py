@@ -86,6 +86,11 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         self._fx_debounce_ids = {}
         self._remote_levels = {}
         self._push_id = None
+        # Live _usb_async threads, so shutdown can wait for them. Set before
+        # anything in construction can start one.
+        self._workers = set()
+        # Source ids with a calibration in flight; one per row at a time.
+        self._calibrating = set()
         # One-shot re-read of the routing after a mix output change settles.
         self._output_refresh_id = None
         self._sources = sources_module.load_seeded()
@@ -672,7 +677,25 @@ class WaveXLRWindow(Adw.ApplicationWindow):
             except Exception as e:
                 if on_error:
                     GLib.idle_add(on_error, e)
-        threading.Thread(target=_worker, daemon=True).start()
+            finally:
+                self._workers.discard(threading.current_thread())
+        thread = threading.Thread(target=_worker, daemon=True)
+        # Tracked so shutdown can wait for them. These threads hold the
+        # libusb handle and run subprocesses; closing the device out from
+        # under one, then finalizing the interpreter while it is still
+        # inside C code, is a segfault on the way out — which reads as
+        # "it crashed when I closed it".
+        self._workers.add(thread)
+        thread.start()
+
+    def _join_workers(self, timeout=2.0):
+        """Give in-flight background work a bounded chance to finish."""
+        deadline = time.monotonic() + timeout
+        for thread in list(self._workers):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            thread.join(timeout=remaining)
 
     def _try_connect(self):
         # One connect at a time: the device watch, the poll-error path and
@@ -838,6 +861,27 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         if self._poll_id:
             GLib.source_remove(self._poll_id)
             self._poll_id = None
+
+    def _stop_timers(self):
+        """Disarm every timer this window owns.
+
+        Only the 10 Hz USB poll was ever stopped, so on the way out the
+        2 s stream tick, the device watch, the reconnect tick and every
+        pending debounce stayed armed — free to fire against a half-torn-down
+        window, and to re-enter work that shutdown had already finished.
+        """
+        self._stop_polling()
+        for attr in ("_stream_poll_id", "_device_watch_id", "_reconnect_id",
+                     "_output_refresh_id", "_push_id"):
+            source_id = getattr(self, attr, None)
+            if source_id:
+                GLib.source_remove(source_id)
+            setattr(self, attr, None)
+        for ids in (self._cell_debounce_ids, self._fx_debounce_ids):
+            for pending in list(ids.values()):
+                GLib.source_remove(pending)
+            ids.clear()
+        self._throttle.cancel_all()
 
     def _poll_tick(self):
         """Called every 100ms — read every device's state in background.
@@ -1101,16 +1145,27 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         return entries, current, summary, monitored
 
     def _refresh_outputs(self):
-        """Push the live sink list into every mix header's output menu."""
-        sinks = list_output_sinks()
-        default_sink = default_sink_name()
-        for mix_id in self._mixes:
-            entries, current, summary, monitored = self._output_entries(
-                mix_id, sinks, default_sink,
-            )
-            self.matrix.set_mix_outputs(
-                mix_id, entries, current, summary, monitored,
-            )
+        """Push the live sink list into every mix header's output menu.
+
+        The enumeration is a pw-dump plus a pactl; both run on a worker and
+        only the menu-filling half runs here, because this is reached from a
+        400 ms timer after every output change as well as from window
+        construction.
+        """
+        def _query():
+            return list_output_sinks(), default_sink_name()
+
+        def _apply(result):
+            sinks, default_sink = result
+            for mix_id in list(self._mixes):
+                entries, current, summary, monitored = self._output_entries(
+                    mix_id, sinks, default_sink,
+                )
+                self.matrix.set_mix_outputs(
+                    mix_id, entries, current, summary, monitored,
+                )
+
+        self._usb_async(_query, on_done=_apply)
 
     def _on_mix_volume_changed(self, _matrix, mix_id, value):
         """A header's master slider moved: throttled like every live slider,
@@ -1346,14 +1401,20 @@ class WaveXLRWindow(Adw.ApplicationWindow):
     _DEVICE_POLL_EVERY = 3
 
     def _stream_poll_tick(self):
-        self.mixer.poll_streams()
-        if not self.mixer.volumes_restored:
-            # _do_start restores once, and the mix sinks may not have existed
-            # yet when it did -- first run creates them, and a PipeWire
-            # restart recreates them. Retrying here is what reopens the gate;
-            # without it the masters stay at whatever the daemon made them.
-            self.mixer.restore_mix_volumes()
-        self.mixer.observe_mix_volumes()
+        # Everything that shells out goes to the mixer's worker; this tick
+        # only reads the snapshots those tasks leave behind. A pw-dump or a
+        # pactl on the GTK thread every 2 seconds is a main loop that
+        # regularly stops reading its Wayland connection, and a compositor
+        # that re-tiles windows as they move produces enough configure
+        # traffic during a drag to fill the socket and have the client cut
+        # loose -- the window disappearing with no traceback to show for it.
+        self.mixer.request_stream_poll()
+        # restore-then-observe, in that order and gated the same way:
+        # _do_start restores once, and the mix sinks may not have existed
+        # yet when it did -- first run creates them, and a PipeWire restart
+        # recreates them. Retrying reopens the gate; without it the masters
+        # stay at whatever the daemon made them.
+        self.mixer.request_volume_sync()
         self._device_poll_countdown -= 1
         check_devices = self._device_poll_countdown <= 0
         if check_devices:
@@ -1436,10 +1497,23 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         logging.warning(
             "%s has produced no audio for %.0fs; reopening %s",
             source.get("name", source_id), silent_for, card)
-        if recovery_module.cycle_card(card):
+
+        def _cycled(ok, sid=source_id):
+            if not ok:
+                return
             # The node is destroyed and recreated by the cycle, so the meter
             # is pointing at something that no longer exists.
-            self._refresh_device_meter(source_id, source)
+            current = self._sources.get(sid)
+            if current is not None:
+                self._refresh_device_meter(sid, current)
+
+        # Off the GTK thread: cycle_card is three pactl calls at a 5 second
+        # timeout each, and this runs from a 2 second tick. Blocking the
+        # main loop for that long stalls the Wayland connection along with
+        # the UI, which is fatal on a compositor that expects prompt replies
+        # to the configure events a window move generates.
+        self._usb_async(lambda: recovery_module.cycle_card(card),
+                        on_done=_cycled)
 
     def _start_meters(self):
         """Meter every source that has something to meter."""
@@ -1636,7 +1710,10 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         for mix_id in self._mixes:
             self._wire_cell(source["id"], mix_id)
         self.mixer.set_sources(self._sources)
-        self.mixer.poll_streams()
+        # On the worker: this runs once per discovered device at startup, and
+        # a pw-dump apiece on the GTK thread is exactly the stall that costs
+        # the window its Wayland connection while it is being moved.
+        self.mixer.request_stream_poll()
         self._refresh_source_meter(source["id"])
         self._refresh_mix_emptiness()
 
@@ -1664,9 +1741,17 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         Offered once, not enforced: a node this has already proposed is
         recorded, so a row the user deletes stays deleted instead of coming
         back on the next launch.
+
+        The enumeration is a pw-dump, so it happens on a worker and the rows
+        are added when it lands -- this is reached from window construction
+        and from every USB reconnect, and it used to spend two pw-dumps of
+        GTK-thread time on both.
         """
+        self._usb_async(_list_captures, on_done=self._add_discovered_inputs)
+
+    def _add_discovered_inputs(self, devices):
         elgato_nodes = {
-            d["name"] for d in _list_captures()
+            d["name"] for d in devices
             if d.get("vendor_id") == ELGATO_VID and d.get("name")
         }
         # A row added before this flag existed, or one the user added by hand
@@ -1684,7 +1769,7 @@ class WaveXLRWindow(Adw.ApplicationWindow):
 
         bound = self._bound_capture_nodes()
         added = []
-        for dev in _list_captures():
+        for dev in devices:
             node = dev.get("name")
             if dev.get("vendor_id") != ELGATO_VID:
                 continue
@@ -1804,6 +1889,11 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         the previous calibration.
         """
         from . import calibrate
+        # One at a time. Two runs mean two pw-cat pairs on the same node,
+        # two stacked modals, and whichever finishes last silently winning
+        # the store — including over the other's freshly written settings.
+        if source_id in self._calibrating:
+            return
         source = self._sources.get(source_id)
         node = (source or {}).get("node_name")
         if not node or not self.mixer.capture_device_present(node):
@@ -1828,39 +1918,42 @@ class WaveXLRWindow(Adw.ApplicationWindow):
 
         def _go(d, result):
             if d.choose_finish(result) == "start":
-                self._calibrate_run(cell, source_id, node)
+                self._calibrate_run(source_id, node)
 
         intro.choose(self, None, _go)
 
-    def _calibrate_run(self, cell, source_id, node):
+    def _calibrate_run(self, source_id, node):
         from . import calibrate
-        state = {"cancelled": False}
+        self._calibrating.add(source_id)
+        cancelled = threading.Event()
         prog = Adw.AlertDialog(heading="Calibrating…",
                                body="🤫  Stay silent…")
         prog.add_response("cancel", "Cancel")
 
         def _on_cancel(d, result):
             d.choose_finish(result)
-            state["cancelled"] = True
+            # Read inside the capture loop, not merely between the two
+            # captures: Cancel used to hide the dialog and leave the
+            # recording running to the end of its ten seconds.
+            cancelled.set()
 
         prog.choose(self, None, _on_cancel)
 
         def _work():
             floor_m = calibrate.metrics_from_raw(
-                calibrate.capture_raw(node, calibrate.FLOOR_SECONDS))
-            if state["cancelled"]:
-                return None
+                calibrate.capture_raw(node, calibrate.FLOOR_SECONDS,
+                                      cancel=cancelled.is_set))
             GLib.idle_add(prog.set_body, "🗣  Now speak normally…")
             speech_m = calibrate.metrics_from_raw(
-                calibrate.capture_raw(node, calibrate.SPEECH_SECONDS))
-            if state["cancelled"]:
-                return None
+                calibrate.capture_raw(node, calibrate.SPEECH_SECONDS,
+                                      cancel=cancelled.is_set))
             result = calibrate.analyze(
                 floor_m["peaks_db"], speech_m["peaks_db"])
             result["fx"].update(calibrate.analyze_tone(floor_m, speech_m))
             return result
 
         def _done(result):
+            self._calibrating.discard(source_id)
             prog.force_close()
             if result is None:
                 return
@@ -1868,9 +1961,17 @@ class WaveXLRWindow(Adw.ApplicationWindow):
             if source is None:
                 return
             source["fx"] = {**sources_module.fx(source), **result["fx"]}
-            cell.set_fx(sources_module.fx(source))
+            # Re-resolved, never the row captured ten seconds ago: a reorder
+            # or a second Wave appearing rebuilds every row, and writing the
+            # result into the detached one leaves the visible popover on the
+            # old values — which the next FX touch then writes back over the
+            # calibration.
+            cell = self.matrix.source(source_id)
+            if cell is not None:
+                cell.set_fx(sources_module.fx(source))
             sources_module.save(self._sources)
             self.mixer.set_sources(self._sources)
+            self._push_remote_state()
             m, f = result["measured"], result["fx"]
             tone = f"Low cut {f.get('lowcut', 0)} Hz"
             if f.get("eq_high"):
@@ -1887,10 +1988,19 @@ class WaveXLRWindow(Adw.ApplicationWindow):
                       f"{tone}."),
             )
             report.add_response("ok", "OK")
+            # A window closed to the tray mid-calibration would host both
+            # this and the progress dialog invisibly: no way to dismiss
+            # either, and a stale "Calibrating…" waiting on the next unhide.
+            if not self.get_visible():
+                self.present()
             report.choose(self, None, lambda d, r: d.choose_finish(r))
 
         def _fail(exc):
+            self._calibrating.discard(source_id)
             prog.force_close()
+            # Cancel is not a failure, and it already closed its own dialog.
+            if isinstance(exc, calibrate.CalibrationCancelled):
+                return
             err = Adw.AlertDialog(heading="Calibration failed", body=str(exc))
             err.add_response("ok", "OK")
             err.choose(self, None, lambda d, r: d.choose_finish(r))
@@ -1911,12 +2021,17 @@ class WaveXLRWindow(Adw.ApplicationWindow):
         if prev is not None:
             GLib.source_remove(prev)
 
-        def _apply(sid=source_id, c=cell):
+        def _apply(sid=source_id):
             self._fx_debounce_ids.pop(sid, None)
             source = self._sources.get(sid)
-            if source is None:
+            # Re-resolved rather than captured: a reorder within the debounce
+            # window replaces the row, and the detached widget still holds
+            # whatever it showed before — which would be written back over a
+            # calibration that landed in the meantime.
+            row = self.matrix.source(sid)
+            if source is None or row is None:
                 return GLib.SOURCE_REMOVE
-            source["fx"] = c.fx_settings()
+            source["fx"] = row.fx_settings()
             sources_module.save(self._sources)
             self.mixer.set_sources(self._sources)
             self._push_remote_state()
@@ -2868,11 +2983,15 @@ class WaveXLRApp(Adw.Application):
         subprocesses before the process exits."""
         if self._window is not None:
             self._window._save_ui_state()
-            self._window._stop_polling()
+            self._window._stop_timers()
             if hasattr(self._window, "meter"):
                 self._window.meter.stop_all()
             if hasattr(self._window, "mixer"):
                 self._window.mixer.stop()
+            # Before the handle closes: a worker inside a control transfer
+            # when the device is disconnected out from under it is the
+            # classic crash-on-quit.
+            self._window._join_workers()
             self._window.dev.disconnect()
         Adw.Application.do_shutdown(self)
 

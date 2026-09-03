@@ -11,9 +11,26 @@ import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Gtk, Adw, GObject, Gdk, Pango  # noqa: E402
+from gi.repository import Gtk, Adw, GObject, Gdk, GLib, Pango  # noqa: E402
 
 from . import icons
+
+
+def _emit_later(obj, signal, *args):
+    """Emit `signal` once the current GTK frame has unwound.
+
+    For signals whose handlers dismantle the very thing that is emitting —
+    a popover being popped down, a row about to be destroyed by the reorder
+    its own drop handler asks for. GTK is still inside the controller or the
+    popup teardown at that moment, and pulling the widget out from under it
+    is a use-after-free on a good day and an xdg_popup protocol error (which
+    kills the client outright) on Wayland.
+    """
+    def _fire():
+        obj.emit(signal, *args)
+        return GLib.SOURCE_REMOVE
+
+    GLib.idle_add(_fire)
 
 
 def _percent_label():
@@ -235,7 +252,11 @@ class MixMatrix(Gtk.Box):
         )
         source.connect(
             "move-clicked",
-            lambda _s, delta, sid=source_id: self.emit("move-source-clicked", sid, delta),
+            # Deferred for the same reason as the drop path: the reorder this
+            # asks for destroys the row holding the button that was clicked,
+            # while GTK is still inside that button's own emission.
+            lambda _s, delta, sid=source_id: _emit_later(
+                self, "move-source-clicked", sid, delta),
         )
         self._grid.attach(source, 0, row, 1, 1)
         self._sources[source_id] = source
@@ -272,7 +293,11 @@ class MixMatrix(Gtk.Box):
             icon = Gtk.DragIcon.get_for_drag(drag_obj)
             paintable = Gtk.WidgetPaintable.new(widget)
             picture = Gtk.Picture.new_for_paintable(paintable)
-            picture.set_size_request(widget.get_width(), widget.get_height())
+            # A row remapped but not yet allocated (a workspace switch, a
+            # window just unhidden) measures 0x0, and a 0x0 drag icon is an
+            # invisible drag. Same fallback the drop-zone maths uses.
+            picture.set_size_request(widget.get_width() or 320,
+                                     widget.get_height() or 64)
             icon.set_child(picture)
             widget.set_opacity(0.35)
 
@@ -320,11 +345,15 @@ class MixMatrix(Gtk.Box):
         self._clear_drop_hint(cell)
         if dragged == target_id or dragged not in self._source_ids:
             return False
+        # Both outcomes end in reorder_sources, which destroys every row —
+        # including this one, whose GtkDropTarget GTK is still emitting from
+        # and whose likeness the live GtkDragIcon is still painting. Deferred
+        # so the drop finishes against widgets that still exist.
         if cell is not None and self._drop_is_grouping(cell, y):
-            self.emit("group-sources-clicked", dragged, target_id)
+            _emit_later(self, "group-sources-clicked", dragged, target_id)
             return True
         delta = self._source_ids.index(target_id) - self._source_ids.index(dragged)
-        self.emit("move-source-clicked", dragged, delta)
+        _emit_later(self, "move-source-clicked", dragged, delta)
         return True
 
     def set_source_group(self, source_id, group):
@@ -983,9 +1012,13 @@ class SourceCell(Gtk.Box):
             box.append(r)
 
         auto_btn = Gtk.Button(label="Auto-calibrate gate + comp")
+        # The handler opens a dialog; emitting inline would present it in the
+        # same frame as this popover's popup teardown, and a grab moving
+        # between a dying xdg_popup and a new one is the crash this button
+        # was reported for.
         auto_btn.connect("clicked",
                          lambda _b: (pop.popdown(),
-                                     self.emit("fx-autotune")))
+                                     _emit_later(self, "fx-autotune")))
         box.append(auto_btn)
 
         self._fx_lowcut = Gtk.DropDown.new_from_strings(

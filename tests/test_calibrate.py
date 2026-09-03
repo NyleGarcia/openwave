@@ -1,6 +1,10 @@
 """Calibration analysis: measurements in, sane thresholds out."""
 
+import os
+import threading
+import time
 import unittest
+from unittest import mock
 
 from wavexlr import calibrate
 
@@ -110,6 +114,107 @@ class Metrics(unittest.TestCase):
         frames = (b"\x10\x27" + b"\x00\x00") * 48000  # L loud, R silent
         m = calibrate.metrics_from_raw(frames)
         self.assertLess(m["balance"], 0.05)
+
+
+class FakeProc:
+    """A pw-cat that writes what it is told to, down a real pipe.
+
+    A real pipe rather than a stub file object because the capture loop
+    selects on the descriptor — a mock that merely returns bytes would not
+    exercise the thing being tested.
+    """
+
+    def __init__(self, payload=b"", chunk=8192):
+        self._read_fd, self._write_fd = os.pipe()
+        self.stdout = os.fdopen(self._read_fd, "rb", buffering=0)
+        self.terminated = False
+        self.killed = False
+        self.reaped = False
+        self._writer = threading.Thread(
+            target=self._write, args=(payload, chunk), daemon=True)
+        self._writer.start()
+
+    def _write(self, payload, chunk):
+        try:
+            for i in range(0, len(payload), chunk):
+                os.write(self._write_fd, payload[i:i + chunk])
+        except OSError:
+            pass
+        # Deliberately left open: a stalled pw-cat neither delivers nor
+        # exits, which is exactly the case the deadline exists for.
+
+    def terminate(self):
+        self.terminated = True
+        try:
+            os.close(self._write_fd)
+        except OSError:
+            pass
+
+    def kill(self):
+        self.killed = True
+
+    def wait(self, timeout=None):
+        self.reaped = True
+        return 0
+
+
+class Capture(unittest.TestCase):
+    def setUp(self):
+        self.procs = []
+
+    def _popen(self, payload=b""):
+        def factory(*_a, **_kw):
+            proc = FakeProc(payload)
+            self.procs.append(proc)
+            return proc
+        return factory
+
+    def test_a_stalled_node_ends_at_the_deadline(self):
+        """No audio, no EOF: the read must give up rather than block forever."""
+        with mock.patch("subprocess.Popen", self._popen(b"")), \
+                mock.patch.object(calibrate, "GRACE_SECONDS", 0.2):
+            started = time.monotonic()
+            with self.assertRaisesRegex(calibrate.CalibrationError, "stalled"):
+                calibrate.capture_raw("node", 1, channels=1)
+            self.assertLess(time.monotonic() - started, 5,
+                            "a stalled capture must not hang the worker")
+        self.assertTrue(self.procs[0].terminated)
+        self.assertTrue(self.procs[0].reaped, "an unreaped pw-cat is a zombie")
+
+    def test_cancel_stops_the_capture_in_flight(self):
+        """Cancel is polled during the read, not only between captures."""
+        cancelled = threading.Event()
+        cancelled.set()
+        with mock.patch("subprocess.Popen", self._popen(b"")):
+            with self.assertRaises(calibrate.CalibrationCancelled):
+                calibrate.capture_raw("node", 5, cancel=cancelled.is_set)
+        self.assertTrue(self.procs[0].terminated,
+                        "cancelling must stop the child, not abandon it")
+
+    def test_a_full_capture_returns_its_seconds_of_audio(self):
+        rate, frame, seconds = calibrate.RATE, 4, 1
+        payload = b"\x10\x27\x10\x27" * (rate * (seconds + 1))
+        with mock.patch("subprocess.Popen", self._popen(payload)):
+            raw = calibrate.capture_raw("node", seconds)
+        # The half-second connection transient is dropped, the rest kept.
+        self.assertGreaterEqual(len(raw), rate * frame * seconds // 2)
+        self.assertEqual(len(raw) % frame, 0)
+
+    def test_a_missing_pw_cat_is_a_calibration_error(self):
+        with mock.patch("subprocess.Popen", side_effect=OSError("no pw-cat")):
+            with self.assertRaisesRegex(calibrate.CalibrationError, "record"):
+                calibrate.capture_raw("node", 1)
+
+
+class EmptyMeasurements(unittest.TestCase):
+    def test_percentile_of_nothing_explains_itself(self):
+        """Not IndexError, and not the largest value standing in silently."""
+        with self.assertRaises(calibrate.CalibrationError):
+            calibrate._percentile([], 50)
+
+    def test_analyze_with_no_speech_windows(self):
+        with self.assertRaises(calibrate.CalibrationError):
+            calibrate.analyze(windows(-62), [])
 
 
 if __name__ == "__main__":
