@@ -121,6 +121,17 @@ class MeterMonitor:
             proc.terminate()
         except (OSError, ProcessLookupError):
             return
+        # Reaped off the caller's thread. stop() is called from the GTK
+        # thread on every meter refresh, and the waits below are up to two
+        # seconds each: a main loop sitting in waitpid is a main loop not
+        # servicing its Wayland connection, which is how a window being
+        # moved around ends up killed for not draining its socket.
+        threading.Thread(
+            target=self._reap, args=(proc,), daemon=True,
+        ).start()
+
+    @staticmethod
+    def _reap(proc):
         try:
             proc.wait(timeout=1)
         except subprocess.TimeoutExpired:
@@ -155,7 +166,8 @@ class MeterMonitor:
                 data = proc.stdout.read(self.CHUNK_BYTES)
                 if not data or len(data) < 2:
                     break
-                self._last_data[source_id] = time.monotonic()
+                if source_id in self._procs:   # not a meter already stopped
+                    self._last_data[source_id] = time.monotonic()
                 n = len(data) // 2
                 samples = struct.unpack(f"<{n}h", data[: n * 2])
                 peak = max(abs(s) for s in samples) / 32768.0

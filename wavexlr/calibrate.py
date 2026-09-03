@@ -10,65 +10,65 @@ graph.
 """
 
 import math
+import os
+import select
 import struct
 import subprocess
+import time
+
+from .mixer import _set_pdeathsig   # same child-dies-with-us rule as the meters
 
 RATE = 48000
-WINDOW = 1600           # ~33 ms of s16 mono @ 48 kHz
+WINDOW = 1600           # 800 s16 mono samples — 16.7 ms @ 48 kHz
 FLOOR_SECONDS = 3
 SPEECH_SECONDS = 5
+# How long past its own duration a capture is given before it is called
+# stalled. pw-cat delivers in real time, so anything beyond this is a node
+# that stopped producing rather than a slow one.
+GRACE_SECONDS = 3
+# Longest a single read may block, and so the worst-case latency of a cancel.
+_POLL_SECONDS = 0.25
 
 
 class CalibrationError(Exception):
     pass
 
 
-def capture_window_peaks_db(node_name, seconds):
-    """Per-window peak dBFS from `seconds` of one node, transient skipped."""
-    # pw-cat records until killed; the duration is ours to enforce by
-    # reading exactly the byte budget and then stopping the child.
-    budget = RATE * 2 * seconds + RATE  # + half a second of transient
-    try:
-        proc = subprocess.Popen(
-            ["pw-cat", "--record", "--target", node_name,
-             "--rate", str(RATE), "--channels", "1", "--format", "s16", "-"],
-            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-        )
-    except OSError as exc:
-        raise CalibrationError(f"could not record {node_name}: {exc}")
-    chunks, got = [], 0
-    try:
-        while got < budget:
-            chunk = proc.stdout.read(min(65536, budget - got))
-            if not chunk:
-                break
-            chunks.append(chunk)
-            got += len(chunk)
-    finally:
-        proc.terminate()
-        try:
-            proc.wait(timeout=2)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-    raw = b"".join(chunks)[RATE:]  # drop the connection transient
-    peaks = []
-    for i in range(0, len(raw) - WINDOW, WINDOW):
-        n = WINDOW // 2
-        samples = struct.unpack(f"<{n}h", raw[i:i + WINDOW])
-        peak = max(abs(s) for s in samples) / 32768.0
-        peaks.append(20 * math.log10(max(peak, 1e-7)))
-    if len(peaks) < seconds * 10:
-        raise CalibrationError(
-            f"{node_name} delivered almost no audio — is the device stalled?")
-    return peaks
+class CalibrationCancelled(Exception):
+    """The caller asked for the capture to stop before it finished."""
 
 
-def capture_raw(node_name, seconds, channels=2):
-    """Exactly `seconds` of raw s16 off one node, transient dropped.
+def _read_exactly(proc, budget, deadline, cancel):
+    """Up to `budget` bytes from `proc`, honouring a deadline and a cancel.
 
-    Stereo by default: channel balance is one of the things calibration
-    can judge, and a mono device simply delivers two equal channels.
+    A plain `read()` on the pipe was the bug this exists to avoid: pw-cat
+    neither exits nor delivers when its node goes away mid-capture (an
+    unplugged microphone, a suspended device), so the read blocked forever
+    — a worker thread parked for good and a modal "Calibrating…" that could
+    never be dismissed. Polled instead, so both the clock and the Cancel
+    button can end it.
     """
+    chunks, got = [], 0
+    while got < budget:
+        if cancel is not None and cancel():
+            raise CalibrationCancelled()
+        if time.monotonic() > deadline:
+            break
+        ready, _, _ = select.select([proc.stdout], [], [], _POLL_SECONDS)
+        if not ready:
+            continue
+        # os.read, not stdout.read: the latter blocks until it has the full
+        # count, which is the blocking this loop exists to avoid.
+        chunk = os.read(proc.stdout.fileno(), min(65536, budget - got))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        got += len(chunk)
+    return b"".join(chunks)
+
+
+def _capture(node_name, seconds, channels, cancel):
+    """`seconds` of s16 off one node as raw bytes, transient included."""
     frame = 2 * channels
     budget = RATE * frame * seconds + RATE * frame // 2
     try:
@@ -77,24 +77,45 @@ def capture_raw(node_name, seconds, channels=2):
              "--rate", str(RATE), "--channels", str(channels),
              "--format", "s16", "-"],
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            preexec_fn=_set_pdeathsig,
         )
     except OSError as exc:
         raise CalibrationError(f"could not record {node_name}: {exc}")
-    chunks, got = [], 0
+    deadline = time.monotonic() + seconds + GRACE_SECONDS
     try:
-        while got < budget:
-            chunk = proc.stdout.read(min(65536, budget - got))
-            if not chunk:
-                break
-            chunks.append(chunk)
-            got += len(chunk)
+        return _read_exactly(proc, budget, deadline, cancel)
     finally:
-        proc.terminate()
+        # Reaped, not merely signalled: an unreaped pw-cat is a zombie for
+        # the life of the app, and one left running holds a stream open on
+        # the node that health.py then reads as a stalled device.
         try:
+            proc.terminate()
             proc.wait(timeout=2)
         except subprocess.TimeoutExpired:
             proc.kill()
-    raw = b"".join(chunks)[RATE * frame // 2:]
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                pass
+        except (OSError, ProcessLookupError):
+            pass
+        try:
+            proc.stdout.close()
+        except OSError:
+            pass
+
+
+def capture_raw(node_name, seconds, channels=2, cancel=None):
+    """Exactly `seconds` of raw s16 off one node, transient dropped.
+
+    Stereo by default: channel balance is one of the things calibration
+    can judge, and a mono device simply delivers two equal channels.
+
+    `cancel`, if given, is polled while reading; when it returns True the
+    child is stopped and CalibrationCancelled is raised.
+    """
+    frame = 2 * channels
+    raw = _capture(node_name, seconds, channels, cancel)[RATE * frame // 2:]
     if len(raw) < RATE * frame * seconds // 2:
         raise CalibrationError(
             f"{node_name} delivered almost no audio — is the device stalled?")
@@ -183,6 +204,10 @@ def analyze_tone(floor_metrics, speech_metrics):
 
 
 def _percentile(values, pct):
+    # Empty in means ordered[-1] — the largest value — silently standing in
+    # for a percentile of nothing. Say so instead.
+    if not values:
+        raise CalibrationError("nothing was measured — is the device stalled?")
     ordered = sorted(values)
     return ordered[min(len(ordered) - 1, int(len(ordered) * pct / 100))]
 
@@ -196,7 +221,9 @@ def analyze(floor_peaks_db, speech_peaks_db):
     """
     floor = _percentile(floor_peaks_db, 50)
     voiced = [p for p in speech_peaks_db if p > floor + 10]
-    if len(voiced) < len(speech_peaks_db) * 0.1:
+    # `0 < 0` is False, so an empty speech capture would otherwise walk
+    # straight past the ratio test into a percentile of nothing.
+    if not voiced or len(voiced) < len(speech_peaks_db) * 0.1:
         raise CalibrationError(
             "I did not hear speech clearly above the noise floor — "
             "try again closer to the microphone.")

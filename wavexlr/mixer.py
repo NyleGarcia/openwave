@@ -1770,6 +1770,37 @@ class Mixer:
         """
         self._enqueue(("poll",), self._do_poll_capture_devices)
 
+    def request_stream_poll(self):
+        """poll_streams on the worker, for callers on the GTK thread.
+
+        Same reasoning as request_capture_poll, and the same danger it was
+        written to avoid: poll_streams shells out to pw-dump with a 5 second
+        timeout, and it was being driven straight from a 2 second GLib
+        timeout. A main loop stuck in that call is a main loop not reading
+        the Wayland socket, which on a compositor that resizes and re-tiles
+        windows as they move is enough configure/enter/leave traffic to fill
+        the client buffer and get the connection cut -- the window vanishing
+        mid-drag, with no traceback anywhere.
+
+        Its own key, so a stream poll never displaces a pending reconcile.
+        """
+        self._enqueue(("stream-poll",), self.poll_streams)
+
+    def request_volume_sync(self):
+        """Restore-then-observe the mix masters on the worker.
+
+        Both halves call pactl; both were on the GTK thread every 2 seconds.
+        The gate order is preserved exactly: nothing is observed until a
+        restore has succeeded, or the unity the daemon just created the
+        sinks at would be persisted over the remembered values.
+        """
+        self._enqueue(("volumes",), self._do_volume_sync)
+
+    def _do_volume_sync(self):
+        if not self._volumes_restored:
+            self.restore_mix_volumes()
+        self.observe_mix_volumes()
+
     def _do_poll_capture_devices(self):
         added, removed = self._refresh_live_captures()
         if added or removed:
