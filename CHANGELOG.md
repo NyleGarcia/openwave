@@ -5,7 +5,7 @@ versions are git tags (see [Releases](../../releases)).
 
 ## [Unreleased]
 
-## [1.3.0] — 2026-09-03
+## [1.2.1] — 2026-09-03
 
 ### Fixed
 - **The window survives being moved.** Everything that shells out now

@@ -1,7 +1,7 @@
 # Maintainer: Zedwil <nylegarcia01@gmail.com>
 # Contributor: rikkichy
 pkgname=openwave
-pkgver=1.3.0
+pkgver=1.2.1
 pkgrel=1
 pkgdesc="The audio mixing matrix for Linux — per-app mixes, per-mix outputs, Elgato Wave control"
 arch=('any')
