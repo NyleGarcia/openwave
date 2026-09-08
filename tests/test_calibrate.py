@@ -171,7 +171,7 @@ class Capture(unittest.TestCase):
 
     def test_a_stalled_node_ends_at_the_deadline(self):
         """No audio, no EOF: the read must give up rather than block forever."""
-        with mock.patch("subprocess.Popen", self._popen(b"")), \
+        with mock.patch.object(calibrate.child, "spawn", self._popen(b"")), \
                 mock.patch.object(calibrate, "GRACE_SECONDS", 0.2):
             started = time.monotonic()
             with self.assertRaisesRegex(calibrate.CalibrationError, "stalled"):
@@ -185,7 +185,7 @@ class Capture(unittest.TestCase):
         """Cancel is polled during the read, not only between captures."""
         cancelled = threading.Event()
         cancelled.set()
-        with mock.patch("subprocess.Popen", self._popen(b"")):
+        with mock.patch.object(calibrate.child, "spawn", self._popen(b"")):
             with self.assertRaises(calibrate.CalibrationCancelled):
                 calibrate.capture_raw("node", 5, cancel=cancelled.is_set)
         self.assertTrue(self.procs[0].terminated,
@@ -194,14 +194,14 @@ class Capture(unittest.TestCase):
     def test_a_full_capture_returns_its_seconds_of_audio(self):
         rate, frame, seconds = calibrate.RATE, 4, 1
         payload = b"\x10\x27\x10\x27" * (rate * (seconds + 1))
-        with mock.patch("subprocess.Popen", self._popen(payload)):
+        with mock.patch.object(calibrate.child, "spawn", self._popen(payload)):
             raw = calibrate.capture_raw("node", seconds)
         # The half-second connection transient is dropped, the rest kept.
         self.assertGreaterEqual(len(raw), rate * frame * seconds // 2)
         self.assertEqual(len(raw) % frame, 0)
 
     def test_a_missing_pw_cat_is_a_calibration_error(self):
-        with mock.patch("subprocess.Popen", side_effect=OSError("no pw-cat")):
+        with mock.patch.object(calibrate.child, "spawn", side_effect=OSError("no pw-cat")):
             with self.assertRaisesRegex(calibrate.CalibrationError, "record"):
                 calibrate.capture_raw("node", 1)
 

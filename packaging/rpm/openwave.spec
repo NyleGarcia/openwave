@@ -22,12 +22,17 @@ Source0:        openwave-@SRCVER@.tar.gz
 Requires:       python3 >= 3.10
 Requires:       python3-gobject
 Requires:       gtk4
-Requires:       libadwaita
+# Adw.Dialog and Adw.AlertDialog are 1.5 API; 1.4 cannot run the app.
+Requires:       libadwaita >= 1.5
+Requires:       adwaita-icon-theme
 Requires:       libusb1
 Requires:       pipewire-utils
 Requires:       wireplumber
 Requires:       alsa-utils
+Requires:       pulseaudio-utils
+Requires:       polkit
 Recommends:     python3-xlib
+Recommends:     ladspa-swh-plugins
 
 %description
 Per-app mixes with per-mix outputs, plus native control of Elgato Wave

@@ -33,6 +33,50 @@ class TestUdevRules(unittest.TestCase):
             self.assertNotIn("#", rule)
 
 
+class TestInstalledScript(unittest.TestCase):
+    """What the pkexec script is allowed to do as root.
+
+    It once ended by walking /dev/bus/usb and chmod 0666-ing every node whose
+    ID_VENDOR_ID was 0fd9, to spare the user a replug. That is every Elgato
+    device on the bus — a Stream Deck, a Cam Link, a key light — handed
+    world-writable raw USB access by a rule set that is otherwise careful to
+    name three product ids. The trigger lines already re-apply MODE="0666" to
+    connected supported devices, so the loop bought nothing it was entitled to.
+    """
+
+    def _script(self):
+        captured = {}
+
+        def fake_run(argv, **kwargs):
+            with open(argv[1]) as f:
+                captured["text"] = f.read()
+            return mock.Mock(returncode=0, stdout="", stderr="")
+
+        with mock.patch.object(setup.subprocess, "run", fake_run), \
+             mock.patch.object(setup.os, "unlink", lambda _p: None):
+            setup.install_udev()
+        return captured["text"]
+
+    def test_grants_no_permission_outside_the_rules(self):
+        script = self._script()
+        self.assertNotIn("chmod", script)
+        self.assertNotIn("/dev/bus/usb", script)
+        self.assertNotIn("ID_VENDOR_ID", script)
+
+    def test_every_profile_is_triggered(self):
+        script = self._script()
+        for p in PROFILES:
+            self.assertIn(
+                f"--attr-match=idVendor={p.vid:04x} "
+                f"--attr-match=idProduct={p.pid:04x}",
+                script,
+                f"{p.display_name} is ruled but never triggered",
+            )
+
+    def test_one_trigger_per_profile(self):
+        self.assertEqual(self._script().count("udevadm trigger"), len(PROFILES))
+
+
 class TestUdevInstalled(unittest.TestCase):
     def _check(self, content):
         with tempfile.TemporaryDirectory() as d:

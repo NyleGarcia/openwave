@@ -5,6 +5,50 @@ versions are git tags (see [Releases](../../releases)).
 
 ## [Unreleased]
 
+### Security
+- **First-run setup no longer widens permissions beyond the devices it
+  rules.** The pkexec script ended by walking `/dev/bus/usb` and
+  `chmod 0666`-ing every node whose `ID_VENDOR_ID` was `0fd9` — every
+  Elgato device on the bus, a Stream Deck or key light included — to
+  spare the user a replug. The udev rules it had just written name three
+  product ids for exactly that reason, and the `udevadm trigger` lines
+  already re-apply `MODE="0666"` to connected supported devices, so the
+  loop bought no convenience it was entitled to. Removed, with tests
+  pinning that the script grants nothing outside its own rules. Ported
+  from upstream `rikkichy/openwave`, which found it first.
+
+### Fixed
+- **Audio helpers no longer set their parent-death signal from
+  `preexec_fn`.** `pw-loopback`, the meter's `pw-cat` and calibration's
+  each ran the `PR_SET_PDEATHSIG` prctl in the forked child between
+  `fork()` and `exec()`, where only async-signal-safe work is legal.
+  This is a threaded GTK process: a fork inherits one thread and all of
+  the locks, so a malloc arena or import lock held by another thread at
+  the instant of the fork is held forever in the child. The prctl now
+  runs in an interpreter of its own (`wavexlr/child.py`) that `execvp`s
+  the helper over itself — same pid, so `terminate`, `kill` and `wait`
+  still reach the process the caller means, and no supervisor is left
+  behind. Shape ported from upstream.
+- **The udev trigger list is derived from `PROFILES`.** It was the last
+  hardcoded device subset in `setup.py`, next to a comment explaining why
+  the rules and the installed-check stopped being ones; a profile added
+  without editing it would have been ruled but never triggered, needing
+  a replug it should not.
+
+### Packaging
+- **Declare what the app actually shells out to.** Nothing named
+  `polkit` (first-run setup runs `pkexec`), `libpulse`/`pulseaudio-utils`
+  (the mixer moves masters with `pactl`), `alsa-utils` (`device.py`
+  discovers ALSA controls with `amixer` and `aplay`), `wireplumber`
+  (`wpctl`), or the PipeWire CLI tools. `libadwaita` is now `>= 1.5`,
+  which is not cosmetic: the app builds `Adw.Dialog` and
+  `Adw.AlertDialog`, and 1.4 has neither. `swh-plugins` is declared
+  optional — the gate and compressor are LADSPA `gate_1410` and
+  `sc4m_1916`, and nothing had ever said so.
+- **`install.sh` installs its optional packages one at a time.** A single
+  name a distro spells differently used to fail the whole transaction and
+  take the required set down with it.
+
 ## [1.2.1] — 2026-09-03
 
 ### Fixed
