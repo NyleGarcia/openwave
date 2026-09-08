@@ -111,22 +111,20 @@ def needs_setup():
 def install_udev():
     """Install udev rules via pkexec."""
     rules = "\n".join(UDEV_RULES)
+    # Derived from PROFILES for the same reason the rules are: a trigger list
+    # that has to be edited by hand is one a new profile gets left out of, and
+    # a device that is ruled but never triggered needs a replug it should not.
+    triggers = "\n".join(
+        "udevadm trigger --subsystem-match=usb "
+        "--attr-match=idVendor=%04x --attr-match=idProduct=%04x" % (p.vid, p.pid)
+        for p in PROFILES
+    )
     script = f"""#!/bin/sh
 cat > {UDEV_PATH} <<'EOF'
 {rules}
 EOF
 udevadm control --reload-rules
-udevadm trigger --subsystem-match=usb --attr-match=idVendor=0fd9 --attr-match=idProduct=007d
-udevadm trigger --subsystem-match=usb --attr-match=idVendor=0fd9 --attr-match=idProduct=0070
-udevadm trigger --subsystem-match=usb --attr-match=idVendor=0fd9 --attr-match=idProduct=00a6
-# Also chmod the device node directly so no replug is needed
-for dev in /dev/bus/usb/*/; do
-    for f in "$dev"*; do
-        if udevadm info --query=property "$f" 2>/dev/null | grep -q 'ID_VENDOR_ID=0fd9'; then
-            chmod 0666 "$f"
-        fi
-    done
-done
+{triggers}
 """
     tmp = "/tmp/openwave-udev-setup.sh"
     with open(tmp, "w") as f:
