@@ -19,7 +19,7 @@ import gi
 gi.require_version("GLib", "2.0")
 from gi.repository import GLib  # noqa: E402
 
-from .mixer import _set_pdeathsig  # share the pdeathsig helper
+from . import child
 
 
 class MeterMonitor:
@@ -69,7 +69,7 @@ class MeterMonitor:
         if capture_sink:
             props["stream.capture.sink"] = True
         try:
-            proc = subprocess.Popen(
+            proc = child.spawn(
                 [
                     "pw-cat", "--record",
                     "--target", source_node_name,
@@ -81,7 +81,6 @@ class MeterMonitor:
                 ],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
-                preexec_fn=_set_pdeathsig,
             )
         except (FileNotFoundError, OSError):
             return

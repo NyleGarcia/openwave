@@ -10,33 +10,18 @@ restarts (the loopbacks themselves do not — they're respawned by start()).
 """
 
 import atexit
-import ctypes
 import json
 import logging
 import os
-import signal
 import re
 import subprocess
 import sys
 import threading
 import time
 from threading import Event, Lock
-from . import sources
+from . import child, sources
 
 _log = logging.getLogger(__name__)
-
-# Linux-only: make spawned children receive SIGTERM if our process dies.
-# Survives SIGKILL on the parent, hard crashes, anything that skips Python
-# cleanup paths. Without this, pw-loopback children leak on unclean exit.
-_PR_SET_PDEATHSIG = 1
-try:
-    _libc = ctypes.CDLL("libc.so.6", use_errno=True)
-    _libc.prctl.argtypes = (
-        ctypes.c_int, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong,
-    )
-    _libc.prctl.restype = ctypes.c_int
-except (OSError, AttributeError):
-    _libc = None
 
 
 ELGATO_VID = 0x0FD9
@@ -344,12 +329,19 @@ def _set_default_sink(name):
 def _spawn_loopback_proc(argv, detach):
     """Start a pw-loopback, or None if it cannot start."""
     try:
-        return subprocess.Popen(
+        if detach:
+            # A mix's output loopback outlives this process on purpose, so it
+            # gets its own session and no parent-death signal.
+            return subprocess.Popen(
+                argv,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        return child.spawn(
             argv,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            preexec_fn=None if detach else _set_pdeathsig,
-            start_new_session=detach,
         )
     except (FileNotFoundError, OSError):
         return None
@@ -438,10 +430,6 @@ def _is_output_key(key):
     """True for a mix's output loopback, which outlives this process."""
     return isinstance(key, tuple) and len(key) == 2 and key[0] == "output"
 
-
-def _set_pdeathsig():
-    if _libc is not None:
-        _libc.prctl(_PR_SET_PDEATHSIG, int(signal.SIGTERM), 0, 0, 0)
 
 CONFIG_PATH = os.path.expanduser("~/.config/openwave/mixes.json")
 

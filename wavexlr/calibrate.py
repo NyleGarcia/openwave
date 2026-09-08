@@ -16,7 +16,7 @@ import struct
 import subprocess
 import time
 
-from .mixer import _set_pdeathsig   # same child-dies-with-us rule as the meters
+from . import child
 
 RATE = 48000
 WINDOW = 1600           # 800 s16 mono samples — 16.7 ms @ 48 kHz
@@ -72,12 +72,11 @@ def _capture(node_name, seconds, channels, cancel):
     frame = 2 * channels
     budget = RATE * frame * seconds + RATE * frame // 2
     try:
-        proc = subprocess.Popen(
+        proc = child.spawn(
             ["pw-cat", "--record", "--target", node_name,
              "--rate", str(RATE), "--channels", str(channels),
              "--format", "s16", "-"],
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-            preexec_fn=_set_pdeathsig,
         )
     except OSError as exc:
         raise CalibrationError(f"could not record {node_name}: {exc}")
