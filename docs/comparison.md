@@ -151,8 +151,5 @@ Artefacts of the fork that have not been cleaned up:
   9), and `flake.nix:90` and `.github/workflows/release.yml:92` still name it
   as the homepage. `PKGBUILD` and the README correctly point here.
 - `LICENSE` is still `Copyright (c) 2025 rikkichy`.
-- `27b06b2` cut 1.3.0 and `0a27152` cut 1.2.1 after it; `CHANGELOG.md` has no
-  1.3.0 section and `PKGBUILD` is on `pkgver=1.2.1`. There are no local git
-  tags pinning any of it.
 - `README.md:107` calls the gate and compressor roadmap items, but
   `sources.py:270` implements both.
