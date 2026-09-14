@@ -1,9 +1,14 @@
-use super::dialogs;
+use super::{
+    components::{
+        fader::{Fader, FaderChange, LevelMute},
+        fx::FxControls,
+    },
+    dialogs,
+};
 use crate::{Submit, icons::Icons};
 use adw::prelude::*;
 use gtk::{gdk, glib};
 use openwave_core::{
-    effects::FxSettings,
     model::*,
     routing::{OutputDecision, claim_streams, eligible_output, resolve_output},
 };
@@ -61,69 +66,6 @@ struct MixHeader {
     remove: gtk::Button,
     delete_hint: gtk::Label,
     meter_key: String,
-}
-#[derive(Clone)]
-struct Fader {
-    widget: gtk::Box,
-    scale: gtk::Scale,
-    mute: gtk::ToggleButton,
-    percent: gtk::Label,
-    capture: bool,
-}
-impl Fader {
-    fn new(capture: bool, label: &str) -> Self {
-        let widget = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-        let mute = gtk::ToggleButton::builder()
-            .valign(gtk::Align::Center)
-            .build();
-        mute.add_css_class("flat");
-        mute.add_css_class("circular");
-        let scale = gtk::Scale::with_range(gtk::Orientation::Horizontal, 0.0, 1.0, 0.01);
-        scale.set_draw_value(false);
-        scale.set_round_digits(2);
-        scale.set_hexpand(true);
-        scale.set_valign(gtk::Align::Center);
-        scale.add_css_class("openwave-mix-slider");
-        scale.set_tooltip_text(Some(label));
-        scale.update_property(&[gtk::accessible::Property::Label(label)]);
-        let percent = gtk::Label::builder()
-            .label("0%")
-            .xalign(1.0)
-            .width_chars(4)
-            .build();
-        for class in ["caption", "dim-label", "monospace"] {
-            percent.add_css_class(class);
-        }
-        widget.append(&mute);
-        widget.append(&scale);
-        widget.append(&percent);
-        Self {
-            widget,
-            scale,
-            mute,
-            percent,
-            capture,
-        }
-    }
-    fn render(&self, level: f64, muted: bool) {
-        self.scale.set_value(level);
-        self.mute.set_active(muted);
-        self.percent.set_label(&format!("{:.0}%", level * 100.0));
-        self.mute.set_icon_name(if self.capture {
-            if muted {
-                "microphone-sensitivity-muted-symbolic"
-            } else {
-                "audio-input-microphone-symbolic"
-            }
-        } else if muted {
-            "audio-volume-muted-symbolic"
-        } else {
-            "audio-volume-high-symbolic"
-        });
-        self.mute
-            .set_tooltip_text(Some(if muted { "Unmute" } else { "Mute" }));
-        css(&self.widget, "openwave-muted", muted);
-    }
 }
 fn css(widget: &impl IsA<gtk::Widget>, class: &str, enabled: bool) {
     if enabled {
@@ -366,44 +308,19 @@ impl MatrixState {
         padding(&cell.widget, 12, 10);
         cell.scale.set_widget_name(&format!("send-{source}-{mix}"));
         let (sid, mid, weak) = (source.clone(), mix.clone(), Rc::downgrade(self));
-        let percent = cell.percent.downgrade();
-        let mute = cell.mute.downgrade();
-        cell.scale.connect_value_changed(move |scale| {
+        cell.connect_changed(LevelMute::FollowLevel, move |change| {
             if let Some(state) = weak.upgrade() {
-                if state.updating.get() {
-                    return;
-                }
-                let level = scale.value();
-                state.updating.set(true);
-                if let Some(percent) = percent.upgrade() {
-                    percent.set_label(&format!("{:.0}%", level * 100.0));
-                }
-                if let Some(mute) = mute.upgrade() {
-                    mute.set_active(level < 0.01);
-                }
-                state.updating.set(false);
+                let (level, muted, timing) = match change {
+                    FaderChange::Level { level, muted } => (level, muted, EditTiming::Debounced),
+                    FaderChange::Mute { level, muted } => (level, muted, EditTiming::Immediate),
+                };
                 (state.submit)(AppCommand::SetCell {
                     source: sid.clone(),
                     mix: mid.clone(),
                     level,
-                    muted: level < 0.01,
-                    timing: EditTiming::Debounced,
+                    muted,
+                    timing,
                 });
-            }
-        });
-        let (sid, mid, weak) = (source.clone(), mix.clone(), Rc::downgrade(self));
-        let scale = cell.scale.downgrade();
-        cell.mute.connect_toggled(move |button| {
-            if let (Some(state), Some(scale)) = (weak.upgrade(), scale.upgrade()) {
-                if !state.updating.get() {
-                    (state.submit)(AppCommand::SetCell {
-                        source: sid.clone(),
-                        mix: mid.clone(),
-                        level: scale.value(),
-                        muted: button.is_active(),
-                        timing: EditTiming::Immediate,
-                    });
-                }
             }
         });
         cell
@@ -477,28 +394,18 @@ impl MatrixState {
         fader.widget.set_hexpand(true);
         controls.append(&fader.widget);
         let (sid, weak) = (source.id.clone(), Rc::downgrade(self));
-        let percent = fader.percent.downgrade();
-        fader.scale.connect_value_changed(move |scale| {
+        fader.connect_changed(LevelMute::Independent, move |change| {
             if let Some(state) = weak.upgrade() {
-                if !state.updating.get() {
-                    if let Some(percent) = percent.upgrade() {
-                        percent.set_label(&format!("{:.0}%", scale.value() * 100.0));
-                    }
-                    (state.submit)(AppCommand::SetSourceLevel {
+                let command = match change {
+                    FaderChange::Level { level, .. } => AppCommand::SetSourceLevel {
                         source: sid.clone(),
-                        level: scale.value(),
-                    });
-                }
-            }
-        });
-        let (sid, weak) = (source.id.clone(), Rc::downgrade(self));
-        fader.mute.connect_toggled(move |_| {
-            if let Some(state) = weak.upgrade() {
-                if !state.updating.get() {
-                    (state.submit)(AppCommand::ToggleSourceMute {
+                        level,
+                    },
+                    FaderChange::Mute { .. } => AppCommand::ToggleSourceMute {
                         source: sid.clone(),
-                    });
-                }
+                    },
+                };
+                (state.submit)(command);
             }
         });
         let meter = meter(56, 8);
@@ -511,7 +418,26 @@ impl MatrixState {
         fx_button.add_css_class("flat");
         controls.append(&fx_button);
         let fx = if source.kind == SourceKind::Device {
-            let fx = FxControls::new(&source.id, self.updating.clone(), self.submit.clone());
+            let (sid, weak) = (source.id.clone(), Rc::downgrade(self));
+            let (calibration_source, calibration_state) = (source.id.clone(), Rc::downgrade(self));
+            let fx = FxControls::new(
+                move |settings| {
+                    if let Some(state) = weak.upgrade() {
+                        (state.submit)(AppCommand::SetFx {
+                            source: sid.clone(),
+                            settings,
+                            timing: EditTiming::Debounced,
+                        });
+                    }
+                },
+                move || {
+                    if let Some(state) = calibration_state.upgrade() {
+                        (state.submit)(AppCommand::StartCalibration {
+                            source: calibration_source.clone(),
+                        });
+                    }
+                },
+            );
             fx_button.set_popover(Some(&fx.popover));
             Some(fx)
         } else {
@@ -619,35 +545,15 @@ impl MatrixState {
             .set_widget_name(&format!("mix-{}-master", mix.id));
         text.append(&fader.widget);
         let (mid, weak) = (mix.id.clone(), Rc::downgrade(self));
-        let percent = fader.percent.downgrade();
-        let mute = fader.mute.downgrade();
-        fader.scale.connect_value_changed(move |scale| {
-            if let (Some(state), Some(mute)) = (weak.upgrade(), mute.upgrade()) {
-                if !state.updating.get() {
-                    let muted = mute.is_active();
-                    if let Some(percent) = percent.upgrade() {
-                        percent.set_label(&format!("{:.0}%", scale.value() * 100.0));
-                    }
-                    (state.submit)(AppCommand::SetMaster {
-                        mix: mid.clone(),
-                        level: scale.value(),
-                        muted,
-                    });
-                }
-            }
-        });
-        let (mid, weak) = (mix.id.clone(), Rc::downgrade(self));
-        let scale = fader.scale.downgrade();
-        fader.mute.connect_toggled(move |button| {
-            if let (Some(state), Some(scale)) = (weak.upgrade(), scale.upgrade()) {
-                if !state.updating.get() {
-                    let level = scale.value();
-                    (state.submit)(AppCommand::SetMaster {
-                        mix: mid.clone(),
-                        level,
-                        muted: button.is_active(),
-                    });
-                }
+        fader.connect_changed(LevelMute::Independent, move |change| {
+            if let Some(state) = weak.upgrade() {
+                let (FaderChange::Level { level, muted } | FaderChange::Mute { level, muted }) =
+                    change;
+                (state.submit)(AppCommand::SetMaster {
+                    mix: mid.clone(),
+                    level,
+                    muted,
+                });
             }
         });
         let meter = meter(-1, 6);
@@ -1118,209 +1024,6 @@ fn clear_drop(widget: &gtk::Box) {
     widget.remove_css_class("openwave-drop-target");
 }
 
-struct FxControls {
-    popover: gtk::Popover,
-    value: Rc<RefCell<FxSettings>>,
-    lowcut: gtk::DropDown,
-    gate: gtk::Switch,
-    comp: gtk::Switch,
-    mono: gtk::Switch,
-    scales: Vec<gtk::Scale>,
-    delay: gtk::SpinButton,
-}
-impl FxControls {
-    fn new(source: &SourceId, updating: Rc<Cell<bool>>, submit: Submit) -> Self {
-        let popover = gtk::Popover::new();
-        let body = gtk::Box::new(gtk::Orientation::Vertical, 8);
-        padding(&body, 12, 12);
-        let scroll = gtk::ScrolledWindow::builder()
-            .hscrollbar_policy(gtk::PolicyType::Never)
-            .propagate_natural_height(true)
-            .max_content_height(600)
-            .build();
-        scroll.set_child(Some(&body));
-        popover.set_child(Some(&scroll));
-        let (sid, callback) = (source.clone(), submit.clone());
-        menu_button(&popover, &body, "Auto-calibrate microphone", move || {
-            callback(AppCommand::StartCalibration {
-                source: sid.clone(),
-            })
-        });
-        let value = Rc::new(RefCell::new(FxSettings::default()));
-        let lowcut = gtk::DropDown::from_strings(&["Off", "80 Hz", "120 Hz"]);
-        fx_row(&body, "Low cut", &lowcut);
-        let (sid, guard, settings, callback) = (
-            source.clone(),
-            updating.clone(),
-            value.clone(),
-            submit.clone(),
-        );
-        lowcut.connect_selected_notify(move |dropdown| {
-            if !guard.get() {
-                settings.borrow_mut().lowcut = match dropdown.selected() {
-                    1 => 80,
-                    2 => 120,
-                    _ => 0,
-                };
-                callback(AppCommand::SetFx {
-                    source: sid.clone(),
-                    settings: settings.borrow().clone(),
-                    timing: EditTiming::Debounced,
-                });
-            }
-        });
-        let mut switches = Vec::new();
-        for (index, title) in [(0, "Gate"), (1, "Comp"), (2, "Mono")] {
-            let switch = gtk::Switch::builder()
-                .halign(gtk::Align::Start)
-                .valign(gtk::Align::Center)
-                .build();
-            let (sid, guard, settings, callback) = (
-                source.clone(),
-                updating.clone(),
-                value.clone(),
-                submit.clone(),
-            );
-            switch.connect_active_notify(move |switch| {
-                if !guard.get() {
-                    match index {
-                        0 => settings.borrow_mut().gate = switch.is_active(),
-                        1 => settings.borrow_mut().comp = switch.is_active(),
-                        _ => settings.borrow_mut().mono = switch.is_active(),
-                    }
-                    callback(AppCommand::SetFx {
-                        source: sid.clone(),
-                        settings: settings.borrow().clone(),
-                        timing: EditTiming::Debounced,
-                    });
-                }
-            });
-            switches.push((title, switch));
-        }
-        let gate = switches[0].1.clone();
-        let comp = switches[1].1.clone();
-        let mono = switches[2].1.clone();
-        let mut scales = Vec::new();
-        for (index, title, low, high, step) in [
-            (0, "Gate dB", -70.0, -20.0, 1.0),
-            (1, "Comp dB", -30.0, 0.0, 1.0),
-            (2, "Ratio", 1.0, 10.0, 0.5),
-            (3, "Low dB", -12.0, 12.0, 1.0),
-            (4, "Mid dB", -12.0, 12.0, 1.0),
-            (5, "High dB", -12.0, 12.0, 1.0),
-        ] {
-            if index == 0 {
-                fx_row(&body, "Gate", &gate);
-            }
-            if index == 1 {
-                fx_row(&body, "Comp", &comp);
-            }
-            let scale = gtk::Scale::with_range(gtk::Orientation::Horizontal, low, high, step);
-            scale.set_digits(if index == 2 { 1 } else { 0 });
-            scale.set_hexpand(true);
-            scale.set_size_request(160, -1);
-            if index >= 3 {
-                scale.add_mark(0.0, gtk::PositionType::Bottom, None);
-            }
-            fx_row(&body, title, &scale);
-            let (sid, guard, settings, callback) = (
-                source.clone(),
-                updating.clone(),
-                value.clone(),
-                submit.clone(),
-            );
-            scale.connect_value_changed(move |scale| {
-                if !guard.get() {
-                    let mut settings = settings.borrow_mut();
-                    match index {
-                        0 => settings.gate_thresh = scale.value(),
-                        1 => settings.comp_thresh = scale.value(),
-                        2 => settings.comp_ratio = scale.value(),
-                        3 => settings.eq_low = scale.value(),
-                        4 => settings.eq_mid = scale.value(),
-                        _ => settings.eq_high = scale.value(),
-                    }
-                    callback(AppCommand::SetFx {
-                        source: sid.clone(),
-                        settings: settings.clone(),
-                        timing: EditTiming::Debounced,
-                    });
-                }
-            });
-            scales.push(scale);
-        }
-        let gate_scale = scales[0].downgrade();
-        gate.connect_active_notify(move |switch| {
-            if let Some(scale) = gate_scale.upgrade() {
-                scale.set_sensitive(switch.is_active());
-            }
-        });
-        let comp_scales = [scales[1].downgrade(), scales[2].downgrade()];
-        comp.connect_active_notify(move |switch| {
-            for scale in &comp_scales {
-                if let Some(scale) = scale.upgrade() {
-                    scale.set_sensitive(switch.is_active());
-                }
-            }
-        });
-        let delay = gtk::SpinButton::with_range(0.0, 500.0, 5.0);
-        fx_row(&body, "Delay ms", &delay);
-        fx_row(&body, "Mono", &mono);
-        let (sid, guard, settings) = (source.clone(), updating, value.clone());
-        delay.connect_value_changed(move |delay| {
-            if !guard.get() {
-                settings.borrow_mut().delay_ms = delay.value();
-                submit(AppCommand::SetFx {
-                    source: sid.clone(),
-                    settings: settings.borrow().clone(),
-                    timing: EditTiming::Debounced,
-                });
-            }
-        });
-        Self {
-            popover,
-            value,
-            lowcut,
-            gate,
-            comp,
-            mono,
-            scales,
-            delay,
-        }
-    }
-    fn render(&self, settings: FxSettings) {
-        self.lowcut.set_selected(match settings.lowcut {
-            80 => 1,
-            120 => 2,
-            _ => 0,
-        });
-        self.gate.set_active(settings.gate);
-        self.comp.set_active(settings.comp);
-        self.mono.set_active(settings.mono);
-        for (scale, value) in self.scales.iter().zip([
-            settings.gate_thresh,
-            settings.comp_thresh,
-            settings.comp_ratio,
-            settings.eq_low,
-            settings.eq_mid,
-            settings.eq_high,
-        ]) {
-            scale.set_value(value);
-        }
-        self.scales[0].set_sensitive(settings.gate);
-        self.scales[1].set_sensitive(settings.comp);
-        self.scales[2].set_sensitive(settings.comp);
-        self.delay.set_value(settings.delay_ms);
-        *self.value.borrow_mut() = settings;
-    }
-}
-fn fx_row(body: &gtk::Box, title: &str, control: &impl IsA<gtk::Widget>) {
-    let row = gtk::Box::new(gtk::Orientation::Horizontal, 10);
-    row.append(&label(title, 9, ""));
-    row.append(control);
-    body.append(&row);
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1338,7 +1041,8 @@ mod tests {
                 vec![],
             );
             let view = MatrixView::new(icons(), rig.submitter());
-            view.render(rig.snapshot());
+            let initial = rig.snapshot();
+            view.render(initial.clone());
             let personal = MixId::new("personal").unwrap();
             let fader = view
                 .state
@@ -1351,9 +1055,17 @@ mod tests {
             assert_eq!((fader.scale.value(), fader.mute.is_active()), (1.0, false));
             if mute_first {
                 fader.mute.set_active(true);
+                let mut poll = (*initial).clone();
+                poll.outputs = Arc::new((*poll.outputs).clone());
+                view.render(Arc::new(poll));
+                assert!(fader.mute.is_active());
                 fader.scale.set_value(0.25);
             } else {
                 fader.scale.set_value(0.25);
+                let mut poll = (*initial).clone();
+                poll.outputs = Arc::new((*poll.outputs).clone());
+                view.render(Arc::new(poll));
+                assert_eq!(fader.scale.value(), 0.25);
                 fader.mute.set_active(true);
             }
             rig.finish_submissions();

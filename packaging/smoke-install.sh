@@ -404,6 +404,10 @@ screenshot matrix
 
 # Standard AT-SPI Value/Action interfaces operate the actual visible widgets;
 # there are deliberately no private GActions for output/master smoke shortcuts.
+/smoke-control ui set 'music send to personal' 0.0
+assert_state '.cells["music.personal"].volume == 0.0 and .cells["music.personal"].muted'
+/smoke-control ui set 'music send to personal' 0.4
+assert_state '.cells["music.personal"].volume == 0.4 and (.cells["music.personal"].muted | not)'
 /smoke-control ui set 'Personal master volume' 0.5
 assert_state '.volumes.personal.volume == 0.5'
 /smoke-control record openwave_capture_personal /work/evidence/master-scaled.f32 0.00025

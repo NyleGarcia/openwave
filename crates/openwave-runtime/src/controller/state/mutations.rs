@@ -363,8 +363,7 @@ impl Controller {
                 let sources = self.mute_sources_for_unit(unit);
                 let muted = if sources.is_empty() {
                     snapshot
-                        .desired_mute
-                        .or_else(|| snapshot.state.known().map(|state| state.muted))
+                        .effective_mute()
                         .ok_or_else(|| OperationError::unavailable("Device mute is unknown"))?
                 } else {
                     sources

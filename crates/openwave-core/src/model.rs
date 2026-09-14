@@ -673,6 +673,16 @@ pub struct UnitSnapshot {
     pub output_peak: f64,
     pub errors: Vec<OperationIssue>,
 }
+
+impl UnitSnapshot {
+    /// Shared device-control projection: desired mute precedes observed hardware.
+    /// Without either value, the device's mute remains unavailable.
+    pub fn effective_mute(&self) -> Option<bool> {
+        self.desired_mute
+            .or_else(|| self.state.known().map(|state| state.muted))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct CaptureSnapshot {
     pub identity: NodeIdentity,

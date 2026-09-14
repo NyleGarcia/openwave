@@ -3,7 +3,7 @@ use glib::{
     Variant,
     variant::{ObjectPath, StaticVariantType, ToVariant},
 };
-use openwave_core::model::{AppSnapshot, Lifecycle, OperationError, Result, UnitId, UnitSnapshot};
+use openwave_core::model::{AppSnapshot, Lifecycle, OperationError, Result, UnitId};
 use std::{
     cell::{Cell, RefCell},
     collections::BTreeMap,
@@ -98,11 +98,6 @@ struct Presentation {
     enabled: bool,
 }
 
-fn effective_mute(unit: &UnitSnapshot) -> Option<bool> {
-    unit.desired_mute
-        .or_else(|| unit.state.known().map(|state| state.muted))
-}
-
 /// Keep meter-only snapshots allocation-free on the tray path.
 struct PresentationInputs {
     units: Vec<(UnitId, Option<bool>, String)>,
@@ -123,7 +118,7 @@ impl PresentationInputs {
                 .iter()
                 .zip(snapshot.units.iter())
                 .all(|((id, mute, serial), unit)| {
-                    *id == unit.id && *mute == effective_mute(unit) && *serial == unit.info.serial
+                    *id == unit.id && *mute == unit.effective_mute() && *serial == unit.info.serial
                 })
     }
 
@@ -132,7 +127,7 @@ impl PresentationInputs {
             units: snapshot
                 .units
                 .iter()
-                .map(|unit| (unit.id, effective_mute(unit), unit.info.serial.clone()))
+                .map(|unit| (unit.id, unit.effective_mute(), unit.info.serial.clone()))
                 .collect(),
             selected: snapshot.selected_unit,
             black: snapshot.preferences.tray_icon_color == "black",
@@ -149,7 +144,7 @@ impl Presentation {
         let muted_count = snapshot
             .units
             .iter()
-            .filter(|unit| effective_mute(unit) == Some(true))
+            .filter(|unit| unit.effective_mute() == Some(true))
             .count();
         let color = if snapshot.preferences.tray_icon_color == "black" {
             "black"
@@ -168,7 +163,7 @@ impl Presentation {
             } else {
                 format!("{profile} ({})", unit.info.serial)
             };
-            let muted = effective_mute(unit);
+            let muted = unit.effective_mute();
             let detail = match muted {
                 Some(true) => "Muted",
                 Some(false) => "Live",
@@ -198,7 +193,7 @@ impl Presentation {
             )
         };
         let others = muted_count.saturating_sub(usize::from(
-            selected.is_some_and(|unit| effective_mute(unit) == Some(true)),
+            selected.is_some_and(|unit| unit.effective_mute() == Some(true)),
         ));
         if others > 0 {
             tooltip.push_str(&format!(

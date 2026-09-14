@@ -13,6 +13,8 @@ use openwave_runtime::controller::{AppCommand, EditTiming};
 
 use crate::{Submit, icons::Icons};
 
+use super::components::{device_slider::DeviceSlider, value_row};
+
 /// The sidebar renders controller state; it never owns device or preference state.
 pub struct Sidebar {
     pub widget: gtk::ScrolledWindow,
@@ -24,18 +26,13 @@ pub struct Sidebar {
     microphone: adw::PreferencesGroup,
     headphones: adw::PreferencesGroup,
     mute: adw::SwitchRow,
-    gain: gtk::Scale,
-    gain_label: gtk::Label,
+    gain: DeviceSlider,
     gain_lock: gtk::ToggleButton,
     phantom: adw::SwitchRow,
     knob: gtk::Label,
-    headphone: gtk::Scale,
-    headphone_label: gtk::Label,
+    headphone: DeviceSlider,
     low_z: adw::SwitchRow,
-    monitor_row: adw::ActionRow,
-    monitor_slider_row: adw::PreferencesRow,
-    monitor: gtk::Scale,
-    monitor_label: gtk::Label,
+    monitor: DeviceSlider,
     autostart: adw::SwitchRow,
     hidden_autostart: adw::SwitchRow,
     tray_color: adw::ComboRow,
@@ -120,23 +117,21 @@ impl Sidebar {
             .subtitle("Toggle microphone mute")
             .build();
         microphone.add(&mute);
-        let (gain_row, gain_label) = value_row("Gain", 8);
+        let gain = DeviceSlider::new(
+            "Gain",
+            8,
+            "Microphone gain",
+            &gtk::Adjustment::new(0.0, 0.0, 0x5000 as f64, 0x40 as f64, 0x200 as f64, 0.0),
+            |unit, value| format_gain(value as u16, unit.profile.profile().gain_scale),
+        );
         let gain_lock = gtk::ToggleButton::builder()
             .valign(gtk::Align::Center)
             .tooltip_text("Lock gain")
             .build();
         gain_lock.set_child(Some(&icons.image("changes-allow-symbolic", 16)));
         gain_lock.add_css_class("flat");
-        gain_row.add_suffix(&gain_lock);
-        microphone.add(&gain_row);
-        let gain = scale(
-            0.0,
-            0x5000 as f64,
-            0x40 as f64,
-            0x200 as f64,
-            "Microphone gain",
-        );
-        microphone.add(&slider_row(&gain));
+        gain.value_row.add_suffix(&gain_lock);
+        gain.add_to(&microphone);
         let phantom = adw::SwitchRow::builder()
             .title("48V Phantom Power")
             .subtitle("For condenser microphones. Leave off for dynamic mics.")
@@ -150,27 +145,30 @@ impl Sidebar {
 
         let headphones = adw::PreferencesGroup::builder().title("Headphones").build();
         content.append(&headphones);
-        let (headphone_row, headphone_label) = value_row("Volume", 10);
-        headphones.add(&headphone_row);
-        let headphone = scale(-60.0, 0.0, 0.5, 2.0, "Headphone volume");
-        headphones.add(&slider_row(&headphone));
+        let headphone = DeviceSlider::new(
+            "Volume",
+            10,
+            "Headphone volume",
+            &gtk::Adjustment::new(-60.0, -60.0, 0.0, 0.5, 2.0, 0.0),
+            |_, value| format!("{value:.1} dB"),
+        );
+        headphone.add_to(&headphones);
         let low_z = adw::SwitchRow::builder()
             .title("Low Impedance")
             .subtitle("For low impedance headphones")
             .build();
         headphones.add(&low_z);
-        let (monitor_row, monitor_label) = value_row("Monitor Mix", 8);
-        monitor_row.set_subtitle("Mic / PC monitoring balance");
-        headphones.add(&monitor_row);
-        let monitor = scale(
-            0.0,
-            0x6400 as f64,
-            0x100 as f64,
-            0x800 as f64,
+        let monitor = DeviceSlider::new(
+            "Monitor Mix",
+            8,
             "Microphone / PC monitor mix",
+            &gtk::Adjustment::new(0.0, 0.0, 0x6400 as f64, 0x100 as f64, 0x800 as f64, 0.0),
+            |_, value| format!("{:.0}%", value / 256.0),
         );
-        let monitor_slider_row = slider_row(&monitor);
-        headphones.add(&monitor_slider_row);
+        monitor
+            .value_row
+            .set_subtitle("Mic / PC monitoring balance");
+        monitor.add_to(&headphones);
         {
             let interaction = interaction.clone();
             let submit = submit.clone();
@@ -250,47 +248,34 @@ impl Sidebar {
                 }
             });
         }
-        for (scale, label, kind) in [
-            (&gain, &gain_label, Slider::Gain),
-            (&headphone, &headphone_label, Slider::Headphone),
-            (&monitor, &monitor_label, Slider::Monitor),
+        for (slider, kind) in [
+            (&gain, Slider::Gain),
+            (&headphone, Slider::Headphone),
+            (&monitor, Slider::Monitor),
         ] {
             let interaction = interaction.clone();
             let submit = submit.clone();
-            let label = label.clone();
-            scale.connect_value_changed(move |scale| {
-                if !scale.is_sensitive() {
-                    return;
-                }
-                let Some(unit) = interaction.selected() else {
-                    return;
-                };
-                let value = scale.value();
-                if !value.is_finite() {
-                    return;
-                }
+            slider.connect_changed(move |value| {
+                let unit = interaction.selected()?;
                 let profile = unit.profile.profile();
-                let setting = match kind {
+                let (setting, value) = match kind {
                     Slider::Gain => {
                         if interaction.snapshot.borrow().preferences.gain_locked {
-                            return;
+                            return None;
                         }
                         let raw = value.clamp(0.0, f64::from(profile.gain_max)) as u16;
-                        label.set_label(&format_gain(raw, profile.gain_scale));
-                        DeviceSetting::GainRaw(raw)
+                        (DeviceSetting::GainRaw(raw), f64::from(raw))
                     }
                     Slider::Headphone => {
                         let db = value.clamp(-60.0, 0.0);
-                        label.set_label(&format!("{db:.1} dB"));
-                        DeviceSetting::HeadphoneDb(db)
+                        (DeviceSetting::HeadphoneDb(db), db)
                     }
                     Slider::Monitor => {
                         if !profile.has_monitor_mix() {
-                            return;
+                            return None;
                         }
                         let raw = value.clamp(0.0, f64::from(profile.mix_max)) as u16;
-                        label.set_label(&format!("{:.0}%", f64::from(raw) / 256.0));
-                        DeviceSetting::MonitorMix(raw)
+                        (DeviceSetting::MonitorMix(raw), f64::from(raw))
                     }
                 };
                 submit(AppCommand::SetDeviceSetting {
@@ -298,6 +283,7 @@ impl Sidebar {
                     setting,
                     timing: EditTiming::Debounced,
                 });
+                Some((unit, value))
             });
         }
         {
@@ -374,17 +360,12 @@ impl Sidebar {
             headphones,
             mute,
             gain,
-            gain_label,
             gain_lock,
             phantom,
             knob,
             headphone,
-            headphone_label,
             low_z,
-            monitor_row,
-            monitor_slider_row,
             monitor,
-            monitor_label,
             autostart,
             hidden_autostart,
             tray_color,
@@ -465,8 +446,7 @@ impl Sidebar {
         self.low_z
             .set_visible(selected.is_some_and(|unit| unit.id.profile.profile().has_low_z()));
         let has_monitor = selected.is_some_and(|unit| unit.id.profile.profile().has_monitor_mix());
-        self.monitor_row.set_visible(has_monitor);
-        self.monitor_slider_row.set_visible(has_monitor);
+        self.monitor.set_visible(has_monitor);
 
         self.gain_lock.set_active(snapshot.preferences.gain_locked);
         if self.interaction.snapshot.borrow().preferences.gain_locked
@@ -526,52 +506,37 @@ impl Sidebar {
                 }
             }
         }
-        let muted = unit
-            .and_then(|unit| unit.desired_mute)
-            .or_else(|| state.map(|state| state.muted));
+        let muted = unit.and_then(UnitSnapshot::effective_mute);
         self.mute.set_sensitive(muted.is_some());
         self.mute.set_active(muted.unwrap_or(false));
-        self.gain
-            .set_sensitive(gain.is_some() && !snapshot.preferences.gain_locked);
         if let Some(profile) = profile {
             self.gain
+                .widget()
                 .adjustment()
                 .set_upper(f64::from(profile.gain_max));
             if profile.has_monitor_mix() {
                 self.monitor
+                    .widget()
                     .adjustment()
                     .set_upper(f64::from(profile.mix_max));
             }
         }
-        if let Some(raw) = gain {
-            self.gain.set_value(f64::from(raw));
-            if let Some(profile) = profile {
-                self.gain_label
-                    .set_label(&format_gain(raw, profile.gain_scale));
-            }
-        } else {
-            self.gain_label.set_label("—");
-        }
-        self.headphone
-            .set_sensitive(headphone.is_some_and(f64::is_finite));
-        if let Some(db) = headphone.filter(|db| db.is_finite()) {
-            self.headphone.set_value(db);
-            self.headphone_label.set_label(&format!("{db:.1} dB"));
-        } else {
-            self.headphone_label.set_label("—");
-        }
+        self.gain.render(
+            unit.and_then(|unit| gain.map(|raw| (unit.id, f64::from(raw)))),
+            !snapshot.preferences.gain_locked,
+        );
+        self.headphone.render(
+            unit.and_then(|unit| headphone.map(|db| (unit.id, db))),
+            true,
+        );
         self.phantom.set_sensitive(phantom.is_some());
         self.phantom.set_active(phantom.unwrap_or(false));
         self.low_z.set_sensitive(low_z.is_some());
         self.low_z.set_active(low_z.unwrap_or(false));
-        self.monitor.set_sensitive(monitor.is_some());
-        if let Some(raw) = monitor {
-            self.monitor.set_value(f64::from(raw));
-            self.monitor_label
-                .set_label(&format!("{:.0}%", f64::from(raw) / 256.0));
-        } else {
-            self.monitor_label.set_label("—");
-        }
+        self.monitor.render(
+            unit.and_then(|unit| monitor.map(|raw| (unit.id, f64::from(raw)))),
+            true,
+        );
         self.knob
             .set_label(match state.map(|state| state.knob_mode) {
                 Some(KnobMode::Gain) => "Gain",
@@ -610,18 +575,6 @@ fn format_gain(raw: u16, scale: u16) -> String {
     format!("{} dB", value.trim_end_matches('0').trim_end_matches('.'))
 }
 
-fn value_row(title: &str, width: i32) -> (adw::ActionRow, gtk::Label) {
-    let row = adw::ActionRow::builder().title(title).build();
-    let label = gtk::Label::builder()
-        .label("—")
-        .width_chars(width)
-        .xalign(1.0)
-        .build();
-    label.add_css_class("monospace");
-    row.add_suffix(&label);
-    (row, label)
-}
-
 fn info_row(expander: &adw::ExpanderRow, title: &str) -> gtk::Label {
     let (row, label) = value_row(title, 0);
     label.remove_css_class("monospace");
@@ -633,32 +586,10 @@ fn info_row(expander: &adw::ExpanderRow, title: &str) -> gtk::Label {
     label
 }
 
-fn scale(lower: f64, upper: f64, step: f64, page: f64, name: &str) -> gtk::Scale {
-    let adjustment = gtk::Adjustment::new(lower, lower, upper, step, page, 0.0);
-    let scale = gtk::Scale::new(gtk::Orientation::Horizontal, Some(&adjustment));
-    scale.set_hexpand(true);
-    scale.set_draw_value(false);
-    scale.update_property(&[gtk::accessible::Property::Label(name)]);
-    scale
-}
-
-fn slider_row(scale: &gtk::Scale) -> adw::PreferencesRow {
-    let row = adw::PreferencesRow::builder()
-        .activatable(false)
-        .selectable(false)
-        .build();
-    scale.set_margin_start(12);
-    scale.set_margin_end(12);
-    scale.set_margin_top(2);
-    scale.set_margin_bottom(6);
-    row.set_child(Some(scale));
-    row
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ui::test_support::{Rig, icons, unit};
+    use crate::ui::test_support::{Rig, descendants, icons, unit};
 
     #[test]
     #[ignore = "requires the isolated installed GTK test runner"]
@@ -671,17 +602,25 @@ mod tests {
         let initial = rig.snapshot();
         assert_eq!(initial.selected_unit, Some(a.id));
         sidebar.render(initial.clone());
-        assert!(sidebar.headphone.is_sensitive() && sidebar.mute.is_sensitive());
+        assert!(sidebar.headphone.widget().is_sensitive() && sidebar.mute.is_sensitive());
         sidebar.selector.set_selected(1);
         // A stale render cannot re-enable controls with A's values while B is pending.
         sidebar.render(initial);
         assert_eq!(sidebar.selector.selected(), 1);
-        assert!(!sidebar.headphone.is_sensitive() && !sidebar.mute.is_sensitive());
+        assert!(!sidebar.headphone.widget().is_sensitive() && !sidebar.mute.is_sensitive());
         rig.finish_submissions();
-        sidebar.render(rig.snapshot());
-        assert!(sidebar.headphone.is_sensitive() && sidebar.mute.is_sensitive());
-        assert_eq!(sidebar.headphone.value(), -12.0);
-        sidebar.headphone.set_value(-18.0);
+        let selected = rig.snapshot();
+        sidebar.render(selected.clone());
+        assert!(sidebar.headphone.widget().is_sensitive() && sidebar.mute.is_sensitive());
+        assert_eq!(sidebar.headphone.widget().value(), -12.0);
+        sidebar.headphone.widget().set_value(-18.0);
+        sidebar.render(selected);
+        assert_eq!(sidebar.headphone.widget().value(), -18.0);
+        assert!(
+            descendants::<gtk::Label>(&sidebar.headphone.value_row)
+                .iter()
+                .any(|label| label.text() == "-18.0 dB")
+        );
         sidebar.mute.set_active(true);
         rig.finish_submissions();
         let units = rig.device_states();

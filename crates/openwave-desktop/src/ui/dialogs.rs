@@ -1,3 +1,4 @@
+use super::components::editor::{action, cancel, navigation_dialog, page, require_name};
 use crate::{Submit, icons::Icons};
 use adw::prelude::*;
 use openwave_core::{model::*, routing::normalize_identity};
@@ -33,37 +34,6 @@ const MIX_ICONS: &[(&str, &str)] = &[
     ("multimedia-player-symbolic", "Player"),
 ];
 
-fn page(title: &str) -> (adw::NavigationPage, adw::HeaderBar, gtk::Box) {
-    let toolbar = adw::ToolbarView::new();
-    let header = adw::HeaderBar::new();
-    toolbar.add_top_bar(&header);
-    let scroll = gtk::ScrolledWindow::builder()
-        .vexpand(true)
-        .hscrollbar_policy(gtk::PolicyType::Never)
-        .build();
-    let clamp = adw::Clamp::builder()
-        .maximum_size(440)
-        .margin_start(12)
-        .margin_end(12)
-        .margin_top(12)
-        .margin_bottom(12)
-        .build();
-    let body = gtk::Box::new(gtk::Orientation::Vertical, 16);
-    clamp.set_child(Some(&body));
-    scroll.set_child(Some(&clamp));
-    toolbar.set_content(Some(&scroll));
-    (adw::NavigationPage::new(&toolbar, title), header, body)
-}
-fn cancel(header: &adw::HeaderBar, dialog: &adw::Dialog) {
-    let button = gtk::Button::with_label("Cancel");
-    let weak = dialog.downgrade();
-    button.connect_clicked(move |_| {
-        if let Some(dialog) = weak.upgrade() {
-            dialog.close();
-        }
-    });
-    header.pack_start(&button);
-}
 fn hint(text: &str) -> gtk::Label {
     let label = gtk::Label::builder()
         .label(text)
@@ -250,13 +220,7 @@ fn mix_dialog(parent: &gtk::Window, mix: Option<Mix>, icons: Rc<Icons>, submit: 
     } else {
         "Add Mix"
     };
-    let dialog = adw::Dialog::builder()
-        .title(title)
-        .content_width(460)
-        .content_height(430)
-        .build();
-    let nav = adw::NavigationView::new();
-    dialog.set_child(Some(&nav));
+    let (dialog, nav) = navigation_dialog(title, 460, 430);
     let (page, header, body) = page(title);
     cancel(&header, &dialog);
     let name = entry(
@@ -274,16 +238,8 @@ fn mix_dialog(parent: &gtk::Window, mix: Option<Mix>, icons: Rc<Icons>, submit: 
             .unwrap_or("audio-speakers-symbolic"),
         MIX_ICONS,
     );
-    let save = gtk::Button::with_label(if mix.is_some() { "Save" } else { "Add Mix" });
-    save.add_css_class("suggested-action");
-    save.set_sensitive(!name.text().trim().is_empty());
-    header.pack_end(&save);
-    let weak = save.downgrade();
-    name.connect_changed(move |name| {
-        if let Some(save) = weak.upgrade() {
-            save.set_sensitive(!name.text().trim().is_empty());
-        }
-    });
+    let save = action(&header, if mix.is_some() { "Save" } else { "Add Mix" });
+    require_name(&name, &save);
     let weak = save.downgrade();
     name.connect_entry_activated(move |_| {
         if let Some(save) = weak.upgrade() {
@@ -353,13 +309,7 @@ pub fn add_source(
     icons: Rc<Icons>,
     submit: Submit,
 ) {
-    let dialog = adw::Dialog::builder()
-        .title("Add Source")
-        .content_width(480)
-        .content_height(560)
-        .build();
-    let nav = adw::NavigationView::new();
-    dialog.set_child(Some(&nav));
+    let (dialog, nav) = navigation_dialog("Add Source", 480, 560);
     let (page, header, body) = page("Add Source");
     cancel(&header, &dialog);
     body.append(&hint("What should this row carry into your mixes?"));
@@ -419,13 +369,7 @@ pub fn edit_source(
     let Some(source) = snapshot.desired.sources.get(id).cloned() else {
         return;
     };
-    let dialog = adw::Dialog::builder()
-        .title("Edit Source")
-        .content_width(480)
-        .content_height(560)
-        .build();
-    let nav = adw::NavigationView::new();
-    dialog.set_child(Some(&nav));
+    let (dialog, nav) = navigation_dialog("Edit Source", 480, 560);
     source_config(&dialog, &nav, source, true, snapshot, icons, submit);
     dialog.present(Some(parent));
 }
@@ -504,10 +448,8 @@ fn source_picker(
     if choices.is_empty() {
         body.append(&hint("No other capture devices. Connect a headset or microphone, then open this dialog again."));
     }
-    let next = gtk::Button::with_label("Next");
-    next.add_css_class("suggested-action");
+    let next = action(&header, "Next");
     next.set_sensitive(false);
-    header.pack_end(&next);
     let weak = next.downgrade();
     list.connect_row_selected(move |_, row| {
         if let Some(next) = weak.upgrade() {
@@ -611,9 +553,7 @@ fn source_config(
         cancel(&header, dialog);
     }
     let name = entry(&body, "Name", "Source name", &source.name);
-    let save = gtk::Button::with_label(if editing { "Save" } else { "Add Source" });
-    save.add_css_class("suggested-action");
-    header.pack_end(&save);
+    let save = action(&header, if editing { "Save" } else { "Add Source" });
     let bindings = if source.kind == SourceKind::App {
         let group = adw::PreferencesGroup::builder()
             .title("Applications")
@@ -710,13 +650,7 @@ fn source_config(
                 .build(),
         );
         body.append(&group);
-        save.set_sensitive(!name.text().trim().is_empty());
-        let weak = save.downgrade();
-        name.connect_changed(move |name| {
-            if let Some(save) = weak.upgrade() {
-                save.set_sensitive(!name.text().trim().is_empty());
-            }
-        });
+        require_name(&name, &save);
         None
     };
     let group = entry(&body, "Group", "Group name", &source.group);
