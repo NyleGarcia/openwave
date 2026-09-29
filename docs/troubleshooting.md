@@ -35,6 +35,7 @@ A firmware-unresponsive unit may require a deliberate power cycle. Lower monitor
 
 - Check source trim, row mute, send level/mute and mix master level/mute. A zero at any stage can silence the route. Group exclusivity may have muted the source intentionally.
 - A claimed application is moved to its intake. With no nonzero sends it is intentionally silent; removing the source/binding releases management of its streams.
+- A shutdown reporting a retained intake names the streams still on it. Move them to a non-OpenWave output yourself, then close the window again; mutations stay frozen until cleanup completes.
 - An explicitly selected unplugged output remains unavailable. Reconnect it or choose a different output yourself. Only Automatic permits fallback; Not monitored is correct for a capture-only mix.
 - In OBS/voice applications, select the published mix input (`openwave_capture_<mix_id>`). Removing a mix removes that input; its consumers must be repointed.
 - After PipeWire recreates nodes, allow reconciliation to observe the replacements, restore and confirm master levels, and re-establish links. Merely seeing a loopback process is not enough.
