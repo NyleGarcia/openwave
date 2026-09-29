@@ -1733,7 +1733,13 @@ impl Reconciler {
                         .prefix("openwave-fx-")
                         .suffix(".conf")
                         .tempfile()?;
-                    serde_json::to_writer(&mut file, &config)?;
+                    // Pretty, never compact: PipeWire parses module args and
+                    // flags in place and writes a NUL one byte past each
+                    // value. Compact JSON puts the module's closing brace
+                    // there, so every module after the first is swallowed
+                    // and the filter never connects (issue #26).
+                    serde_json::to_writer_pretty(&mut file, &config)?;
+                    file.write_all(b"\n")?;
                     file.flush()?;
                     let child = self.backend.spawn_filter(file.path())?;
                     Ok(Effect {

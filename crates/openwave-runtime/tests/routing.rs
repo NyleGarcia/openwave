@@ -25,6 +25,30 @@ fn mid(s: &str) -> MixId {
 fn props(value: Value) -> Map<String, Value> {
     value.as_object().unwrap().clone()
 }
+// PipeWire parses module args/flags in place and writes a NUL one byte past
+// each value, which it then skips as whitespace. A closing bracket directly
+// after another is exactly what that erases: the module never closes and the
+// rest of context.modules is swallowed (issue #26).
+fn assert_survives_in_place_parse(text: &[u8]) {
+    let (mut quoted, mut escaped) = (false, false);
+    for (i, &byte) in text.iter().enumerate() {
+        if quoted {
+            match byte {
+                _ if escaped => escaped = false,
+                b'\\' => escaped = true,
+                b'"' => quoted = false,
+                _ => {}
+            }
+        } else if byte == b'"' {
+            quoted = true;
+        } else if matches!(byte, b'}' | b']') {
+            assert!(
+                !matches!(text.get(i + 1), Some(b'}' | b']')),
+                "filter config closes two containers back to back at byte {i}"
+            );
+        }
+    }
+}
 
 #[derive(Default)]
 struct World {
@@ -382,7 +406,9 @@ impl GraphBackend for FakeBackend {
         }))
     }
     fn spawn_filter(&mut self, path: &Path) -> Result<Box<dyn RoutingChild>> {
-        let config: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        let text = std::fs::read(path).unwrap();
+        assert_survives_in_place_parse(&text);
+        let config: Value = serde_json::from_slice(&text).unwrap();
         let args = &config["context.modules"][4]["args"];
         let mut w = self.0.lock().expect("routing fixture lock poisoned");
         if w.fail_filter {
