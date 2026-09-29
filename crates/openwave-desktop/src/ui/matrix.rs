@@ -28,6 +28,7 @@ pub struct MatrixView {
 }
 struct MatrixState {
     grid: gtk::Grid,
+    corner: gtk::Box,
     icons: Rc<Icons>,
     submit: Submit,
     latest: Latest,
@@ -153,9 +154,12 @@ impl MatrixView {
         widget.append(&scroll);
         let wrapper = gtk::Box::new(gtk::Orientation::Vertical, 10);
         scroll.set_child(Some(&wrapper));
-        let add_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-        padding(&add_row, 12, 12);
-        wrapper.append(&add_row);
+        // The add buttons live in the grid's otherwise empty top-left cell,
+        // above the source column, instead of spending a row of their own.
+        let corner = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        corner.set_size_request(400, 64);
+        corner.set_valign(gtk::Align::End);
+        corner.set_margin_bottom(6);
         let grid = gtk::Grid::builder()
             .row_spacing(6)
             .column_spacing(6)
@@ -167,6 +171,7 @@ impl MatrixView {
         wrapper.append(&grid);
         let state = Rc::new(MatrixState {
             grid,
+            corner: corner.clone(),
             icons,
             submit,
             latest: Rc::new(RefCell::new(Arc::new(AppSnapshot::default()))),
@@ -183,7 +188,7 @@ impl MatrixView {
         ] {
             let button = gtk::Button::with_label(title);
             button.add_css_class(class);
-            add_row.append(&button);
+            corner.append(&button);
             let weak = Rc::downgrade(&state);
             button.connect_clicked(move |button| {
                 if let (Some(state), Some(parent)) = (weak.upgrade(), parent(button)) {
@@ -278,9 +283,7 @@ impl MatrixState {
         self.cells.borrow_mut().clear();
         *self.source_order.borrow_mut() = snapshot.desired.sources.keys().cloned().collect();
         *self.mix_order.borrow_mut() = snapshot.desired.mixes.keys().cloned().collect();
-        let corner = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-        corner.set_size_request(400, 64);
-        self.grid.attach(&corner, 0, 0, 1, 1);
+        self.grid.attach(&self.corner, 0, 0, 1, 1);
         for (column, (id, mix)) in snapshot.desired.mixes.iter().enumerate() {
             let (widget, header) = self.build_header(mix);
             self.grid.attach(&widget, column as i32 + 1, 0, 1, 1);
