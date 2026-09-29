@@ -135,7 +135,10 @@ else
     git clone --depth 1 "$REPO" "$SRC"
 fi
 msg 'Building the complete native release as the login user'
-make -C "$SRC" build CARGO="rustup run $RUST_VERSION cargo" RUSTC="rustup run $RUST_VERSION rustc"
+# rustup run puts the pinned toolchain first on PATH. Passing
+# RUSTC="rustup run ... rustc" to make does not work: make exports it, and
+# cargo runs $RUSTC as one executable path, spaces and all.
+rustup run "$RUST_VERSION" make -C "$SRC" build
 
 # Freeze all install inputs before any legacy retirement. Final installation uses
 # this private prepared payload, not changing files in the original checkout.
