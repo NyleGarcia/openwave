@@ -32,6 +32,10 @@
     border-radius: 10px;
 }
 
+.openwave-mix-cell {
+    padding: 10px 12px;
+}
+
 .openwave-mix-cell:disabled {
     opacity: 0.55;
 }
