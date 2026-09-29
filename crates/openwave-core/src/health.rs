@@ -668,7 +668,14 @@ pub fn parse_health_graph(value: &Value) -> Result<HealthGraph> {
     for (name, class, node, _) in nodes.values() {
         if *class == "Audio/Source"
             && (name.starts_with("alsa_input.usb-Elgato_Systems_Elgato_Wave_")
-                || name.starts_with("alsa_input.usb-Elgato_Systems_Elgato_XLR_Dock_"))
+                || name.starts_with("alsa_input.usb-Elgato_Systems_Elgato_XLR_Dock_")
+                || name.strip_prefix("alsa_input.usb-").is_some_and(|name| {
+                    name.starts_with(
+                        crate::profiles::ProfileId::XlrDockMk2
+                            .profile()
+                            .capture_serial_prefix,
+                    )
+                }))
         {
             graph.captures.insert((*name).into(), node.clone());
         }

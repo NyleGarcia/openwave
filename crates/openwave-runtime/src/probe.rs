@@ -8,7 +8,7 @@ use clap::{Parser, Subcommand};
 use openwave_core::{
     model::{OperationError, Result, UnitId},
     profiles::ProfileId,
-    protocol::{ConfigBuffer, MAX_CONFIG_LEN},
+    protocol::{DOCK_BLOCKS, MAX_CONFIG_LEN},
 };
 use std::{
     io::{self, BufRead, Read, Write},
@@ -119,7 +119,7 @@ impl ProbeCommand {
                     let off = offset.ok_or_else(|| {
                         OperationError::invalid("poke requires --offset and --byte, or --noop")
                     })?;
-                    if byte.is_none() || usize::from(off) >= profile.profile().config_len {
+                    if byte.is_none() || usize::from(off) >= config_block(profile).1 {
                         return Err(OperationError::invalid(
                             "poke offset is outside the selected profile config, or byte is missing",
                         ));
@@ -132,7 +132,7 @@ impl ProbeCommand {
     }
 }
 /// Raw boundary shared by production transport and deterministic protocol fixtures.
-/// Strict config decoding stays here even when dump accepts a short transfer.
+/// Exact primary-block lengths stay enforced even when dump accepts a short transfer.
 pub trait ProbeDevice {
     fn profile(&self) -> ProfileId;
     fn read_raw(&mut self, selector: u16, buffer: &mut [u8]) -> Result<usize>;
@@ -149,19 +149,21 @@ impl ProbeDevice for VendorDevice {
         self.write_config_raw(bytes)
     }
 }
-fn read_config(device: &mut dyn ProbeDevice) -> Result<ConfigBuffer> {
-    let p = device.profile();
-    let mut bytes = [0; MAX_CONFIG_LEN];
-    let count = device.read_raw(
-        p.profile().wvalue_config,
-        &mut bytes[..p.profile().config_len],
-    )?;
-    if count > p.profile().config_len {
-        return Err(OperationError::unavailable(
-            "USB transfer exceeded config buffer",
-        ));
+fn config_block(profile: ProfileId) -> (u16, usize) {
+    match profile.profile().legacy {
+        Some(p) => (p.wvalue_config, p.config_len),
+        None => (DOCK_BLOCKS[0].1, DOCK_BLOCKS[0].2),
     }
-    ConfigBuffer::decode(p, &bytes[..count])
+}
+fn read_config(device: &mut dyn ProbeDevice, bytes: &mut [u8]) -> Result<()> {
+    let (selector, expected) = config_block(device.profile());
+    let count = device.read_raw(selector, &mut bytes[..expected])?;
+    if count != expected {
+        return Err(OperationError::unavailable(format!(
+            "USB config transfer returned {count} bytes; expected {expected}"
+        )));
+    }
+    Ok(())
 }
 pub fn execute(
     device: &mut dyn ProbeDevice,
@@ -171,15 +173,20 @@ pub fn execute(
     cancelled: &AtomicBool,
 ) -> Result<()> {
     command.validate(device.profile())?;
+    let mut primary = [0; MAX_CONFIG_LEN];
+    let primary = &mut primary[..config_block(device.profile()).1];
     match command {
         ProbeCommand::Dump { wvalue, len } => {
             let p = device.profile().profile();
             let mut bytes = vec![0; usize::from(*len)];
-            let blocks = [
-                ("config", p.wvalue_config, p.config_len),
-                ("meter", p.wvalue_meter, p.meter_len),
-                ("devinfo", p.wvalue_devinfo, p.devinfo_len),
-            ];
+            let blocks = match p.legacy {
+                Some(p) => [
+                    ("config", p.wvalue_config, p.config_len),
+                    ("meter", p.wvalue_meter, p.meter_len),
+                    ("devinfo", p.wvalue_devinfo, p.devinfo_len),
+                ],
+                None => DOCK_BLOCKS,
+            };
             let mut first_error = None;
             for (name, selector, expected) in blocks {
                 let selector = wvalue.unwrap_or(selector);
@@ -221,12 +228,12 @@ pub fn execute(
             }
         }
         ProbeCommand::Watch { interval } => {
-            let mut last = read_config(device)?;
+            read_config(device, primary)?;
             writeln!(
                 output,
                 "config: {} bytes — twiddle controls, Ctrl+C to stop\n{}",
-                last.as_bytes().len(),
-                hexdump(last.as_bytes())
+                primary.len(),
+                hexdump(primary)
             )?;
             output.flush()?;
             while !cancelled.load(Ordering::Acquire) {
@@ -241,19 +248,20 @@ pub fn execute(
                 if cancelled.load(Ordering::Acquire) {
                     break;
                 }
-                let current = read_config(device)?;
-                if current != last {
+                let mut current = [0; MAX_CONFIG_LEN];
+                let current = &mut current[..primary.len()];
+                read_config(device, current)?;
+                if current != primary {
                     let stamp = glib::DateTime::now_local()
                         .and_then(|d| d.format("%H:%M:%S"))
                         .map_err(|e| OperationError::unavailable(e.to_string()))?;
-                    for (off, (a, b)) in last.as_bytes().iter().zip(current.as_bytes()).enumerate()
-                    {
+                    for (off, (a, b)) in primary.iter().zip(current.iter()).enumerate() {
                         if a != b {
                             writeln!(output, "{stamp}  off {off:2}: {a:02x} -> {b:02x}")?;
                         }
                     }
                     output.flush()?;
-                    last = current;
+                    primary.copy_from_slice(current);
                 }
             }
         }
@@ -283,10 +291,8 @@ pub fn execute(
             }
             // Read after consent, so a slow interactive prompt cannot replay a
             // stale full block over a physical adjustment made while waiting.
-            let config = read_config(device)?;
-            let mut bytes = [0; MAX_CONFIG_LEN];
-            let bytes = &mut bytes[..config.as_bytes().len()];
-            bytes.copy_from_slice(config.as_bytes());
+            read_config(device, primary)?;
+            let bytes = primary;
             if let (Some(off), Some(value)) = (offset, byte) {
                 writeln!(
                     output,
@@ -299,8 +305,10 @@ pub fn execute(
                 return Ok(());
             }
             device.write_config(bytes)?;
-            let verified = read_config(device)?;
-            if verified.as_bytes() != bytes {
+            let mut verified = [0; MAX_CONFIG_LEN];
+            let verified = &mut verified[..bytes.len()];
+            read_config(device, verified)?;
+            if verified != bytes {
                 return Err(OperationError::unavailable(
                     "USB write verification failed: read-back differs from the submitted config",
                 ));
@@ -310,7 +318,7 @@ pub fn execute(
                 "wrote and verified {} bytes{}\n{}",
                 bytes.len(),
                 if *noop { " unchanged" } else { "" },
-                hexdump(verified.as_bytes())
+                hexdump(verified)
             )?;
             output.flush()?;
         }

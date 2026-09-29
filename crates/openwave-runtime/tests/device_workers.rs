@@ -49,9 +49,11 @@ mod device {
         }
         fn open(&self, unit: UnitId) -> Result<Box<dyn UnitBackend>> {
             self.0.opens.fetch_add(1, Ordering::SeqCst);
-            let state =
-                ConfigBuffer::decode(unit.profile, &vec![0; unit.profile.profile().config_len])?
-                    .state();
+            let state = ConfigBuffer::decode(
+                unit.profile,
+                &vec![0; unit.profile.profile().legacy.unwrap().config_len],
+            )?
+            .state();
             Ok(Box::new(Backend {
                 fixture: self.0.clone(),
                 unit,

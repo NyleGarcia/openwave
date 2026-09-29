@@ -308,6 +308,15 @@ fn output_watch_follows_actual_links_and_rejects_malformed_graph() {
         }
     );
     assert_eq!(parsed.captures.values().next().unwrap().identity, id("101"));
+    let dock_name = "alsa_input.usb-Elgato_Elgato_Wave_XLR_Dock_MK.2_SERIAL-00.mono-fallback";
+    graph
+        .as_array_mut()
+        .unwrap()
+        .push(graph_node(7, dock_name, "Audio/Source"));
+    assert_eq!(
+        parse_health_graph(&graph).unwrap().captures[dock_name].identity,
+        id("107")
+    );
     graph[2]["info"]["props"] = json!([]);
     assert!(parse_health_graph(&graph).is_err());
     graph[2] = graph_node(2, "alsa_output.linked", "Audio/Sink");

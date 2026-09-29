@@ -135,6 +135,18 @@ fn absent_disconnected_and_duplicate_serials_never_authorize_a_target() {
         ),
         Some(original.unit)
     );
+    let dock = ConnectedIdentity {
+        unit: unit(ProfileId::XlrDockMk2, 7),
+        ..original
+    };
+    assert_eq!(
+        device_for_capture("Elgato_Elgato_Wave_XLR_Dock_MK.2_UNIT_A", &[original, dock]),
+        Some(dock.unit)
+    );
+    assert_eq!(
+        device_for_capture("Elgato_Systems_Elgato_XLR_Dock_UNIT_A", &[dock]),
+        None
+    );
 }
 
 #[test]

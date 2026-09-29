@@ -37,10 +37,11 @@ OpenWave is an open-source, reverse-engineered alternative to Elgato Wave Link f
 |**Wave XLR**|`0fd9:007d`|Gain, mute, 48 V phantom power, headphone volume, low impedance mode|
 |**XLR Dock** (`00a6` variant)|`0fd9:00a6`|Gain, mute, 48 V phantom power, headphone volume, low impedance mode|
 |**Wave:3**|`0fd9:0070`|Gain, mute, headphone volume, monitor mix|
+|**XLR Dock MK.2**|`0fd9:00c7`|Gain, mute, 48 V phantom power, headphone volume, low impedance mode, hardware monitor mix|
 
-Controls are enabled by the device profile. Phantom power and low impedance mode are available on the supported XLR models; monitor mix is available on Wave:3.
+Controls are enabled by the device profile. Phantom power and low impedance mode are available on the supported XLR models; monitor mix is available on Wave:3 and XLR Dock MK.2.
 
-**The similarly named `0fd9:00c7` Dock variant is unverified and disabled.** A product name is not a compatibility guarantee. Enabled profiles do not imply validation of every firmware, the `00a6` unit, or physical multi-device operation for this release. See [hardware support](docs/hardware-support.md).
+The `00c7` backend implements the independently documented three-block vendor protocol, with read-only detection of its two known control banks. It is not an alias for `00a6`. Software checks cover encoding, transport failures and GTK controls; this native backend has not been exercised on a physical `00c7` unit here. Enabled profiles do not certify every firmware or multi-device combination. See [hardware support and protocol provenance](docs/hardware-support.md).
 
 **Before enabling 48 V, check the selected unit and microphone's power requirements.** Scenes and calibration never change phantom power. Capture-to-USB control mapping requires an unambiguous physical identity; a recycled ALSA card number cannot identify a unit.
 
@@ -222,14 +223,14 @@ Manual installs carry a bounded, hashed `install-manifest.json` receipt, so unin
 
 ## How it works
 
-Wave devices use USB Class control transfers on **endpoint 0** for configuration. On Linux, `snd-usb-audio` normally blocks transfers using `wIndex=0x3300`, because interface 0 belongs to the audio driver.
+Wave XLR, the original XLR Dock (`00a6`) and Wave:3 use USB Class control transfers on **endpoint 0** for configuration. On Linux, `snd-usb-audio` normally blocks transfers using `wIndex=0x3300`, because interface 0 belongs to the audio driver.
 
-OpenWave uses **`wIndex=0x3303`**. The firmware checks the `0x33` prefix, while the kernel sees unclaimed interface 3. This permits controls without detaching the audio driver.
+For those profiles, OpenWave uses **`wIndex=0x3303`**. The firmware checks the `0x33` prefix, while the kernel sees unclaimed interface 3. The XLR Dock MK.2 (`00c7`) instead uses vendor requests on claimed interface 3, with read-only selection between `0x0103` and `0x0203`. Neither path detaches the audio driver.
 
 <details>
 <summary><strong>USB protocol and configuration layout</strong></summary>
 
-Supported models use `bRequest=0x85` to read and `bRequest=0x05` to write configuration. Wave XLR and the `0fd9:00a6` XLR Dock share a **34-byte** block; Wave:3 uses a **16-byte** block.
+The legacy profiles use `bRequest=0x85` to read and `bRequest=0x05` to write configuration. Wave XLR and the `0fd9:00a6` XLR Dock share a **34-byte** block; Wave:3 uses a **16-byte** block. The `00c7` Dock uses request `0x01` with separate **38-byte settings**, **2-byte headphone** and **6-byte monitor** blocks; see its [protocol layout](docs/protocol.md#xlr-dock-mk2-0fd900c7).
 
 |Field|Wave XLR / XLR Dock|Wave:3|
 |---|---|---|

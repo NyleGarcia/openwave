@@ -493,12 +493,21 @@ pub fn collect_device(full: bool) -> Result<String> {
                     }
                 }
                 if full {
-                    let _ = writeln!(
-                        out,
-                        "config ({} bytes expected):\n{}",
-                        p.config_len,
-                        note(device.read_config().map(|b| hexdump(b.as_bytes())), full)
-                    );
+                    match device.read_config() {
+                        Ok(config) => {
+                            for (selector, bytes) in config.blocks() {
+                                let _ = writeln!(
+                                    out,
+                                    "config wValue 0x{selector:04X} ({} bytes):\n{}",
+                                    bytes.len(),
+                                    hexdump(bytes)
+                                );
+                            }
+                        }
+                        Err(error) => {
+                            let _ = writeln!(out, "config: {}", note(Err(error), full));
+                        }
+                    }
                 } else {
                     out.push_str("device config: contents withheld (--full includes them)\n");
                 }

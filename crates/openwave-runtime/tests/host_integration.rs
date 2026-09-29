@@ -840,7 +840,7 @@ fn udev_admission_requires_meaning_not_pid_substrings() {
     assert!(!setup::udev_contents_cover(
         &rules.replace("SUBSYSTEM==", "SUBSYSTEM!=")
     ));
-    let reordered = "MODE = \"0666\", ATTR{idProduct} == \"007d\", SUBSYSTEM == \"usb\", ATTR{idVendor} == \"0fd9\"\nMODE=\"0666\", ATTR{idProduct}==\"00a6\", ATTR{idVendor}==\"0fd9\", SUBSYSTEM==\"usb\"\nSUBSYSTEM==\"usb\", ATTR{idVendor}==\"0fd9\", ATTR{idProduct}==\"0070\", MODE=\"0666\"\n";
+    let reordered = "MODE = \"0666\", ATTR{idProduct} == \"007d\", SUBSYSTEM == \"usb\", ATTR{idVendor} == \"0fd9\"\nMODE=\"0666\", ATTR{idProduct}==\"00a6\", ATTR{idVendor}==\"0fd9\", SUBSYSTEM==\"usb\"\nSUBSYSTEM==\"usb\", ATTR{idVendor}==\"0fd9\", ATTR{idProduct}==\"0070\", MODE=\"0666\"\nATTR{idProduct}==\"00c7\", MODE=\"0666\", SUBSYSTEM==\"usb\", ATTR{idVendor}==\"0fd9\"\n";
     assert!(setup::udev_contents_cover(reordered));
 }
 #[test]

@@ -56,6 +56,7 @@ trait Transport: Send {
 struct UsbTransport {
     handle: rusb::DeviceHandle<rusb::Context>,
     profile: ProfileId,
+    windex: u16,
     timed_out: bool,
 }
 impl UsbTransport {
@@ -66,17 +67,18 @@ impl UsbTransport {
 }
 impl Transport for UsbTransport {
     fn read(&mut self, selector: u16, bytes: &mut [u8]) -> Result<usize> {
-        let count = self
-            .handle
-            .read_control(
-                protocol::RT_CLASS_IN,
-                protocol::BREQUEST_READ,
+        let dock = self.profile == ProfileId::XlrDockMk2;
+        let mut read = || {
+            self.handle.read_control(
+                if dock { 0xc1 } else { protocol::RT_CLASS_IN },
+                if dock { 1 } else { protocol::BREQUEST_READ },
                 selector,
-                self.profile.profile().windex,
+                self.windex,
                 bytes,
                 protocol::TRANSFER_TIMEOUT,
             )
-            .map_err(|e| self.error(e))?;
+        };
+        let count = if dock { dock_read(&mut read) } else { read() }.map_err(|e| self.error(e))?;
         self.timed_out = false;
         Ok(count)
     }
@@ -84,10 +86,18 @@ impl Transport for UsbTransport {
         let count = self
             .handle
             .write_control(
-                protocol::RT_CLASS_OUT,
-                protocol::BREQUEST_WRITE,
+                if self.profile == ProfileId::XlrDockMk2 {
+                    0x41
+                } else {
+                    protocol::RT_CLASS_OUT
+                },
+                if self.profile == ProfileId::XlrDockMk2 {
+                    1
+                } else {
+                    protocol::BREQUEST_WRITE
+                },
                 selector,
-                self.profile.profile().windex,
+                self.windex,
                 bytes,
                 protocol::TRANSFER_TIMEOUT,
             )
@@ -100,12 +110,49 @@ impl Transport for UsbTransport {
     }
 }
 
+// Upstream hardware reports transient I/O errors while streaming. Retry reads
+// once on the same bank; never replay a write with potentially real side effects.
+fn dock_read(mut read: impl FnMut() -> rusb::Result<usize>) -> rusb::Result<usize> {
+    match read() {
+        Err(rusb::Error::Io) => read(),
+        result => result,
+    }
+}
+
+// Only known Dock banks and blocks are inspected; connection never writes.
+fn detect_dock_bank(
+    mut read: impl FnMut(u16, u16, &mut [u8]) -> std::result::Result<usize, rusb::Error>,
+) -> Result<u16> {
+    let mut bytes = [0; protocol::MAX_CONFIG_LEN];
+    'bank: for bank in [0x0103, 0x0203] {
+        for (_, selector, length) in protocol::DOCK_BLOCKS {
+            match dock_read(|| read(bank, selector, &mut bytes[..length])) {
+                Ok(count) if count == length => {}
+                Ok(count) if count < length => continue 'bank,
+                Err(rusb::Error::Pipe) => continue 'bank,
+                Ok(_) => return Err(OperationError::invalid("Dock bank read exceeded buffer")),
+                Err(error) => {
+                    return Err(OperationError::unavailable(format!(
+                        "Dock bank 0x{bank:04x}, block 0x{selector:04x}: {error}"
+                    )));
+                }
+            }
+        }
+        return Ok(bank);
+    }
+    Err(OperationError::unavailable(
+        "Dock control banks 0x0103 and 0x0203 did not return the complete settings, headphone and monitor blocks; no writes enabled",
+    ))
+}
+
 /// Raw, known-profile transport for explicitly authorized probing/diagnostics.
-/// None of these reads synchronize ALSA or write USB. No interface is claimed,
-/// detached, reset or reconfigured. A raw write requires separate caller consent.
+/// None of these reads synchronize ALSA or write USB. Dock access claims only
+/// vendor interface 3; no driver detach, reset or alternate-setting changes.
+/// A raw write requires separate caller consent.
 pub struct VendorDevice {
     pub unit: UnitId,
     transport: Box<dyn Transport>,
+    usb_info: Option<DeviceInfo>,
 }
 impl VendorDevice {
     pub fn scan() -> Result<Vec<(ProfileId, u8, u8)>> {
@@ -140,11 +187,37 @@ impl VendorDevice {
                 ));
             }
             let handle = device.open().map_err(usb_error)?;
+            let (windex, usb_info) = if let Some(legacy) = p.legacy {
+                (legacy.windex, None)
+            } else {
+                // rusb releases this claim when the captured handle is dropped.
+                handle.claim_interface(3).map_err(usb_error)?;
+                let bank = detect_dock_bank(|bank, selector, bytes| {
+                    handle.read_control(0xc1, 1, selector, bank, bytes, protocol::TRANSFER_TIMEOUT)
+                })?;
+                let serial = if descriptor.serial_number_string_index().is_some() {
+                    handle
+                        .read_serial_number_string_ascii(&descriptor)
+                        .map_err(usb_error)?
+                } else {
+                    String::new()
+                };
+                (
+                    bank,
+                    Some(DeviceInfo {
+                        api: "Unavailable".into(),
+                        firmware: "Unavailable".into(),
+                        serial,
+                    }),
+                )
+            };
             return Ok(Self {
                 unit,
+                usb_info,
                 transport: Box::new(UsbTransport {
                     handle,
                     profile: unit.profile,
+                    windex,
                     timed_out: false,
                 }),
             });
@@ -158,40 +231,96 @@ impl VendorDevice {
                 "USB read length must be in 1..65535",
             ));
         }
-        let count = self.transport.read(selector, bytes)?;
-        if count > bytes.len() {
+        let length = if self.unit.profile == ProfileId::XlrDockMk2 {
+            let (_, _, length) = protocol::DOCK_BLOCKS.iter()
+                .find(|(_, block, _)| *block == selector)
+                .ok_or_else(|| OperationError::new(
+                    ErrorCode::Unsupported, "Unknown Dock block; only settings, headphones and monitor reads are enabled"
+                ))?;
+            bytes.len().min(*length)
+        } else {
+            bytes.len()
+        };
+        let count = self.transport.read(selector, &mut bytes[..length])?;
+        if count > length {
             return Err(OperationError::invalid("USB transfer exceeded buffer"));
         }
         Ok(count)
     }
     /// Writes a real unchanged or patched profile config, never an arbitrary block.
     pub fn write_config_raw(&mut self, bytes: &[u8]) -> Result<()> {
-        ConfigBuffer::decode(self.unit.profile, bytes)?;
-        let count = self
-            .transport
-            .write(self.unit.profile.profile().wvalue_config, bytes)?;
+        let (selector, length) = self
+            .unit
+            .profile
+            .profile()
+            .legacy
+            .map_or((4, 38), |legacy| (legacy.wvalue_config, legacy.config_len));
+        if bytes.len() != length {
+            return Err(OperationError::invalid(
+                "Invalid primary config block length",
+            ));
+        }
+        let count = self.transport.write(selector, bytes)?;
         if count != bytes.len() {
             return Err(short_transfer(count, bytes.len()));
         }
         Ok(())
     }
     pub fn read_config(&mut self) -> Result<ConfigBuffer> {
+        if self.unit.profile == ProfileId::XlrDockMk2 {
+            let (mut settings, mut headphones, mut monitor) = ([0; 38], [0; 2], [0; 6]);
+            let s = self.read_raw(4, &mut settings)?;
+            let h = self.read_raw(5, &mut headphones)?;
+            let m = self.read_raw(1, &mut monitor)?;
+            return ConfigBuffer::decode_dock(&settings[..s], &headphones[..h], &monitor[..m]);
+        }
         let mut bytes = [0; protocol::MAX_CONFIG_LEN];
-        let p = self.unit.profile.profile();
+        let p = self.unit.profile.profile().legacy.expect("legacy profile");
         let count = self.read_raw(p.wvalue_config, &mut bytes[..p.config_len])?;
         ConfigBuffer::decode(self.unit.profile, &bytes[..count])
     }
     pub fn read_info(&mut self) -> Result<DeviceInfo> {
+        if let Some(info) = &self.usb_info {
+            return Ok(info.clone());
+        }
         let mut bytes = [0; protocol::MAX_INFO_LEN];
-        let p = self.unit.profile.profile();
+        let p = self.unit.profile.profile().legacy.ok_or_else(|| {
+            OperationError::new(
+                ErrorCode::Unsupported,
+                "Dock metadata requires USB descriptors",
+            )
+        })?;
         let count = self.read_raw(p.wvalue_devinfo, &mut bytes[..p.devinfo_len])?;
         protocol::decode_device_info(self.unit.profile, &bytes[..count])
     }
     pub fn read_meters(&mut self) -> Result<MeterLevels> {
         let mut bytes = [0; protocol::MAX_METER_LEN];
-        let p = self.unit.profile.profile();
+        let p = self.unit.profile.profile().legacy.ok_or_else(|| {
+            OperationError::new(
+                ErrorCode::Unsupported,
+                "Dock vendor meters are not mapped; use PCM meters",
+            )
+        })?;
         let count = self.read_raw(p.wvalue_meter, &mut bytes[..p.meter_len])?;
         protocol::decode_meters(self.unit.profile, &bytes[..count])
+    }
+    fn write_changes(&mut self, before: &ConfigBuffer, after: &ConfigBuffer) -> Result<()> {
+        if before.profile() != self.unit.profile || after.profile() != self.unit.profile {
+            return Err(OperationError::new(
+                ErrorCode::Identity,
+                "Config belongs to another profile",
+            ));
+        }
+        for ((_, previous), (selector, bytes)) in before.blocks().zip(after.blocks()) {
+            // Dock controls must not rewrite unrelated blocks.
+            if previous != bytes {
+                let count = self.transport.write(selector, bytes)?;
+                if count != bytes.len() {
+                    return Err(short_transfer(count, bytes.len()));
+                }
+            }
+        }
+        Ok(())
     }
 }
 fn usb_error(error: rusb::Error) -> OperationError {
@@ -533,7 +662,7 @@ trait UnitBackend: Send {
 }
 struct SyncedDevice {
     vendor: VendorDevice,
-    alsa: Box<dyn Alsa>,
+    alsa: Option<Box<dyn Alsa>>,
     mirror: Mirror,
 }
 impl UnitBackend for SyncedDevice {
@@ -542,9 +671,12 @@ impl UnitBackend for SyncedDevice {
     }
     fn poll(&mut self) -> Result<(DeviceState, Vec<OperationIssue>)> {
         let mut config = self.vendor.read_config()?;
-        let (dirty, errors) = self
-            .mirror
-            .observe(&mut config, self.alsa.as_mut(), Instant::now());
+        let (dirty, errors) = if let Some(alsa) = self.alsa.as_mut() {
+            self.mirror
+                .observe(&mut config, alsa.as_mut(), Instant::now())
+        } else {
+            (false, Vec::new())
+        };
         if dirty {
             self.vendor.write_config_raw(config.as_bytes())?;
         }
@@ -558,10 +690,15 @@ impl UnitBackend for SyncedDevice {
             protocol::validate_setting(self.vendor.unit.profile, *setting)?;
         }
         let mut config = self.vendor.read_config()?;
+        let before = (self.vendor.unit.profile == ProfileId::XlrDockMk2).then(|| config.clone());
         for setting in settings {
             config.apply(*setting)?;
         }
-        self.vendor.write_config_raw(config.as_bytes())?;
+        if let Some(before) = before {
+            self.vendor.write_changes(&before, &config)?;
+        } else {
+            self.vendor.write_config_raw(config.as_bytes())?;
+        }
         let state = config.state();
         self.mirror
             .requested(&state, self.vendor.unit.profile, settings);
@@ -584,10 +721,14 @@ impl DeviceFactory for NativeFactory {
     }
     fn open(&self, unit: UnitId) -> Result<Box<dyn UnitBackend>> {
         let vendor = VendorDevice::open(unit)?;
-        let alsa = CardControls::open(unit)?;
+        let alsa = if unit.profile.profile().legacy.is_some() {
+            Some(Box::new(CardControls::open(unit)?) as Box<dyn Alsa>)
+        } else {
+            None
+        };
         Ok(Box::new(SyncedDevice {
             vendor,
-            alsa: Box::new(alsa),
+            alsa,
             mirror: Mirror::default(),
         }))
     }

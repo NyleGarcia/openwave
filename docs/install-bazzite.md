@@ -52,6 +52,7 @@ For the enabled profiles, OpenWave's supplied policy is `/etc/udev/rules.d/99-op
 SUBSYSTEM=="usb", ATTR{idVendor}=="0fd9", ATTR{idProduct}=="007d", MODE="0666"
 SUBSYSTEM=="usb", ATTR{idVendor}=="0fd9", ATTR{idProduct}=="00a6", MODE="0666"
 SUBSYSTEM=="usb", ATTR{idVendor}=="0fd9", ATTR{idProduct}=="0070", MODE="0666"
+SUBSYSTEM=="usb", ATTR{idVendor}=="0fd9", ATTR{idProduct}=="00c7", MODE="0666"
 ```
 
 `/etc` remains host configuration even when `/usr` is immutable. Have the administrator install/reload the rules and reconnect the device when safe. This policy grants local users raw access to these devices; administrators may choose a site-specific access policy instead. Do not overwrite a package-owned or existing administrator rule. Administrator-managed rules also need administrator-managed removal.
