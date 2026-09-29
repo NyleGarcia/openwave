@@ -129,8 +129,9 @@ struct AppUi {
     paths: RuntimePaths,
     handle: RuntimeHandle,
     window: adw::ApplicationWindow,
-    matrix: MatrixView,
-    sidebar: Sidebar,
+    icons: Rc<Icons>,
+    matrix: RefCell<MatrixView>,
+    sidebar: RefCell<Sidebar>,
     split: adw::OverlaySplitView,
     title: adw::WindowTitle,
     warning: gtk::MenuButton,
@@ -221,12 +222,9 @@ impl AppUi {
             header.pack_start(&warning);
             let scene_button = gtk::MenuButton::builder().label("Scenes").build();
             header.pack_start(&scene_button);
-            let menu = gio::Menu::new();
-            menu.append(Some("Settings"), Some("win.settings"));
-            menu.append(Some("Uninstall OpenWave…"), Some("app.uninstall"));
             let menu_button = gtk::MenuButton::builder()
                 .icon_name("open-menu-symbolic")
-                .menu_model(&menu)
+                .menu_model(&application_menu())
                 .tooltip_text("Application menu")
                 .build();
             header.pack_end(&menu_button);
@@ -281,8 +279,9 @@ impl AppUi {
                 paths: paths.clone(),
                 handle: handle.clone(),
                 window,
-                matrix,
-                sidebar,
+                icons: icons.clone(),
+                matrix: RefCell::new(matrix),
+                sidebar: RefCell::new(sidebar),
                 split,
                 title,
                 warning,
@@ -350,11 +349,20 @@ impl AppUi {
             if let Some(ui) = weak.upgrade() {
                 ui.present_main_window(false);
                 ui.split.set_show_sidebar(true);
-                ui.sidebar.render(ui.handle.snapshot());
-                ui.sidebar.focus_settings();
+                let sidebar = ui.sidebar.borrow();
+                sidebar.render(ui.handle.snapshot());
+                sidebar.focus_settings();
             }
         });
         ui.window.add_action(&settings);
+        let reload = gio::SimpleAction::new("reload-interface", None);
+        let weak = Rc::downgrade(&ui);
+        reload.connect_activate(move |_, _| {
+            if let Some(ui) = weak.upgrade() {
+                ui.reload_interface();
+            }
+        });
+        ui.window.add_action(&reload);
         let save = gio::SimpleAction::new("save-scene-as", None);
         let weak = Rc::downgrade(&ui);
         save.connect_activate(move |_, _| {
@@ -797,14 +805,35 @@ impl AppUi {
             });
         }
     }
+    /// Replace the presentation only. The controller, its workers and routing are untouched.
+    fn reload_interface(self: &Rc<Self>) {
+        if self.stopped.get() {
+            return;
+        }
+        // Fresh views render under their own guards, so the first render submits nothing.
+        // Replacing the old views drops their widgets together with every signal closure.
+        let matrix = MatrixView::new(self.icons.clone(), self.submit.clone());
+        let sidebar = Sidebar::new(self.icons.clone(), self.submit.clone());
+        self.split.set_content(Some(&matrix.widget));
+        self.split.set_sidebar(Some(&sidebar.widget));
+        *self.matrix.borrow_mut() = matrix;
+        *self.sidebar.borrow_mut() = sidebar;
+        self.rendered_revision.set(None);
+        // Setup and calibration dialogs are re-presented; generations fence the old responses.
+        *self.setup_phase.borrow_mut() = None;
+        *self.calibration.borrow_mut() = None;
+        self.refresh(self.handle.snapshot());
+        self.render_widgets();
+    }
     fn render_widgets(&self) {
         let snapshot = self.latest.borrow().clone();
-        self.matrix.render(snapshot.clone());
-        self.sidebar.render(snapshot.clone());
+        let (matrix, sidebar) = (self.matrix.borrow(), self.sidebar.borrow());
+        matrix.render(snapshot.clone());
+        sidebar.render(snapshot.clone());
         let active = matches!(snapshot.lifecycle, Lifecycle::Starting | Lifecycle::Running)
             && snapshot.setup_phase == SetupPhase::Ready;
-        self.matrix.widget.set_sensitive(active);
-        self.sidebar.widget.set_sensitive(active);
+        matrix.widget.set_sensitive(active);
+        sidebar.widget.set_sensitive(active);
         let subtitle = snapshot
             .selected_unit
             .and_then(|id| snapshot.units.iter().find(|unit| unit.id == id))
@@ -1069,10 +1098,18 @@ impl AppUi {
     }
 }
 
+fn application_menu() -> gio::Menu {
+    let menu = gio::Menu::new();
+    menu.append(Some("Settings"), Some("win.settings"));
+    menu.append(Some("Reload interface"), Some("win.reload-interface"));
+    menu.append(Some("Uninstall OpenWave…"), Some("app.uninstall"));
+    menu
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ui::test_support::Rig;
+    use crate::ui::test_support::{Rig, descendants};
     use std::time::Instant;
 
     fn fixture() -> (Rig, Rc<AppUi>) {
@@ -1106,6 +1143,56 @@ mod tests {
             );
             std::thread::sleep(Duration::from_millis(2));
         }
+    }
+
+    #[test]
+    fn application_menu_offers_interface_reload() {
+        let menu = application_menu();
+        let actions: Vec<_> = (0..menu.n_items())
+            .filter_map(|index| {
+                menu.item_attribute_value(index, "action", None)
+                    .and_then(|value| value.get::<String>())
+            })
+            .collect();
+        assert_eq!(
+            actions,
+            ["win.settings", "win.reload-interface", "app.uninstall"]
+        );
+    }
+
+    #[test]
+    #[ignore = "requires the isolated installed GTK test runner"]
+    fn reload_interface_replaces_views_without_commands() {
+        let (rig, ui) = fixture();
+        ui.activate();
+        until(&rig, &ui, || ui.main_presented.get());
+        until(&rig, &ui, || !ui.render_pending.get());
+        let before = rig.snapshot();
+        let old: Vec<_> = [
+            ui.matrix.borrow().widget.clone().upcast::<gtk::Widget>(),
+            ui.sidebar.borrow().widget.clone().upcast(),
+        ]
+        .iter()
+        .flat_map(descendants::<gtk::Widget>)
+        .map(|widget| widget.downgrade())
+        .collect();
+        WidgetExt::activate_action(&ui.window, "win.reload-interface", None).unwrap();
+        until(&rig, &ui, || !ui.render_pending.get());
+        assert_eq!(
+            ui.split.content(),
+            Some(ui.matrix.borrow().widget.clone().upcast())
+        );
+        assert_eq!(
+            ui.split.sidebar(),
+            Some(ui.sidebar.borrow().widget.clone().upcast())
+        );
+        assert_eq!(ui.rendered_revision.get(), Some(before.revision));
+        // Finalized widgets take every signal closure, so no old control can double-submit.
+        assert!(old.iter().all(|widget| widget.upgrade().is_none()));
+        // Rebuilding renders the snapshot under the new views' guards and submits nothing.
+        assert_eq!(rig.snapshot().revision, before.revision);
+        assert!(ui.window.visible_dialog().is_none());
+        ui.window.destroy();
     }
 
     #[test]
