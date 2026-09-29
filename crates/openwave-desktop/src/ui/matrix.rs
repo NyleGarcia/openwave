@@ -525,10 +525,12 @@ impl MatrixState {
         widget.add_css_class("openwave-mix-header");
         widget.add_css_class("card");
         widget.set_size_request(220, 78);
+        let column = gtk::Box::new(gtk::Orientation::Vertical, 1);
+        padding(&column, 10, 8);
+        column.set_hexpand(true);
+        widget.append(&column);
         let inner = gtk::Box::new(gtk::Orientation::Horizontal, 10);
-        padding(&inner, 10, 8);
-        inner.set_hexpand(true);
-        widget.append(&inner);
+        column.append(&inner);
         let icon = gtk::Box::new(gtk::Orientation::Horizontal, 0);
         icon.append(&self.icons.image(&mix.icon_name, 22));
         inner.append(&icon);
@@ -545,10 +547,11 @@ impl MatrixState {
         output.add_css_class("dim-label");
         text.append(&output);
         let fader = Fader::new(false, &format!("{} master volume", mix.name));
+        fader.scale.set_size_request(110, -1);
         fader
             .scale
             .set_widget_name(&format!("mix-{}-master", mix.id));
-        text.append(&fader.widget);
+        column.append(&fader.widget);
         let (mid, weak) = (mix.id.clone(), Rc::downgrade(self));
         fader.connect_changed(LevelMute::Independent, move |change| {
             if let Some(state) = weak.upgrade() {
@@ -562,7 +565,7 @@ impl MatrixState {
             }
         });
         let meter = meter(-1, 6);
-        text.append(&meter);
+        column.append(&meter);
         let menu = gtk::MenuButton::builder()
             .icon_name("view-more-symbolic")
             .valign(gtk::Align::Center)
@@ -1082,6 +1085,30 @@ mod tests {
                 (0.25, true),
                 "mute_first={mute_first}"
             );
+        }
+    }
+
+    #[test]
+    #[ignore = "requires the isolated installed GTK test runner"]
+    fn master_slider_keeps_source_width_without_widening_header() {
+        adw::init().expect("private GTK display");
+        let rig = Rig::new(serde_json::json!({}), vec![]);
+        let view = MatrixView::new(icons(), rig.submitter());
+        view.render(rig.snapshot());
+        let headers = view.state.headers.borrow();
+        assert!(!headers.is_empty());
+        for (id, header) in headers.iter() {
+            let card = std::iter::successors(header.fader.scale.parent(), |w| w.parent())
+                .find(|w| w.has_css_class("openwave-mix-header"))
+                .unwrap();
+            let width = |w: &gtk::Widget| w.measure(gtk::Orientation::Horizontal, -1).0;
+            let slider = width(header.fader.scale.upcast_ref());
+            let with = width(&card);
+            header.fader.widget.set_visible(false);
+            let without = width(&card);
+            header.fader.widget.set_visible(true);
+            assert!(slider >= 110, "{id} master slider {slider}px");
+            assert_eq!(with, without, "{id} master fader widens the header");
         }
     }
 }
