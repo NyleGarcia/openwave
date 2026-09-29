@@ -323,6 +323,14 @@ impl Sidebar {
                         )
                     }
                 };
+                // Snapping the row back below makes the switch notify once
+                // more, after the guard is down, with the observed state. That
+                // echo is no request: submitting it re-applied the old value
+                // right behind the user's, so "off" deleted the login entry
+                // and rewrote it ~100 ms later.
+                if row.is_active() == actual {
+                    return;
+                }
                 interaction.updating.set(true);
                 row.set_active(actual);
                 interaction.updating.set(false);
