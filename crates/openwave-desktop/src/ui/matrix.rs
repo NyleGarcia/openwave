@@ -28,6 +28,7 @@ pub struct MatrixView {
 }
 struct MatrixState {
     grid: gtk::Grid,
+    corner: gtk::Box,
     icons: Rc<Icons>,
     submit: Submit,
     latest: Latest,
@@ -153,9 +154,12 @@ impl MatrixView {
         widget.append(&scroll);
         let wrapper = gtk::Box::new(gtk::Orientation::Vertical, 10);
         scroll.set_child(Some(&wrapper));
-        let add_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-        padding(&add_row, 12, 12);
-        wrapper.append(&add_row);
+        // The add buttons live in the grid's otherwise empty top-left cell,
+        // above the source column, instead of spending a row of their own.
+        let corner = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        corner.set_size_request(400, 64);
+        corner.set_valign(gtk::Align::End);
+        corner.set_margin_bottom(6);
         let grid = gtk::Grid::builder()
             .row_spacing(6)
             .column_spacing(6)
@@ -167,6 +171,7 @@ impl MatrixView {
         wrapper.append(&grid);
         let state = Rc::new(MatrixState {
             grid,
+            corner: corner.clone(),
             icons,
             submit,
             latest: Rc::new(RefCell::new(Arc::new(AppSnapshot::default()))),
@@ -183,7 +188,7 @@ impl MatrixView {
         ] {
             let button = gtk::Button::with_label(title);
             button.add_css_class(class);
-            add_row.append(&button);
+            corner.append(&button);
             let weak = Rc::downgrade(&state);
             button.connect_clicked(move |button| {
                 if let (Some(state), Some(parent)) = (weak.upgrade(), parent(button)) {
@@ -278,9 +283,7 @@ impl MatrixState {
         self.cells.borrow_mut().clear();
         *self.source_order.borrow_mut() = snapshot.desired.sources.keys().cloned().collect();
         *self.mix_order.borrow_mut() = snapshot.desired.mixes.keys().cloned().collect();
-        let corner = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-        corner.set_size_request(400, 64);
-        self.grid.attach(&corner, 0, 0, 1, 1);
+        self.grid.attach(&self.corner, 0, 0, 1, 1);
         for (column, (id, mix)) in snapshot.desired.mixes.iter().enumerate() {
             let (widget, header) = self.build_header(mix);
             self.grid.attach(&widget, column as i32 + 1, 0, 1, 1);
@@ -522,10 +525,12 @@ impl MatrixState {
         widget.add_css_class("openwave-mix-header");
         widget.add_css_class("card");
         widget.set_size_request(220, 78);
+        let column = gtk::Box::new(gtk::Orientation::Vertical, 1);
+        padding(&column, 10, 8);
+        column.set_hexpand(true);
+        widget.append(&column);
         let inner = gtk::Box::new(gtk::Orientation::Horizontal, 10);
-        padding(&inner, 10, 8);
-        inner.set_hexpand(true);
-        widget.append(&inner);
+        column.append(&inner);
         let icon = gtk::Box::new(gtk::Orientation::Horizontal, 0);
         icon.append(&self.icons.image(&mix.icon_name, 22));
         inner.append(&icon);
@@ -542,10 +547,11 @@ impl MatrixState {
         output.add_css_class("dim-label");
         text.append(&output);
         let fader = Fader::new(false, &format!("{} master volume", mix.name));
+        fader.scale.set_size_request(110, -1);
         fader
             .scale
             .set_widget_name(&format!("mix-{}-master", mix.id));
-        text.append(&fader.widget);
+        column.append(&fader.widget);
         let (mid, weak) = (mix.id.clone(), Rc::downgrade(self));
         fader.connect_changed(LevelMute::Independent, move |change| {
             if let Some(state) = weak.upgrade() {
@@ -559,7 +565,7 @@ impl MatrixState {
             }
         });
         let meter = meter(-1, 6);
-        text.append(&meter);
+        column.append(&meter);
         let menu = gtk::MenuButton::builder()
             .icon_name("view-more-symbolic")
             .valign(gtk::Align::Center)
@@ -1079,6 +1085,30 @@ mod tests {
                 (0.25, true),
                 "mute_first={mute_first}"
             );
+        }
+    }
+
+    #[test]
+    #[ignore = "requires the isolated installed GTK test runner"]
+    fn master_slider_keeps_source_width_without_widening_header() {
+        adw::init().expect("private GTK display");
+        let rig = Rig::new(serde_json::json!({}), vec![]);
+        let view = MatrixView::new(icons(), rig.submitter());
+        view.render(rig.snapshot());
+        let headers = view.state.headers.borrow();
+        assert!(!headers.is_empty());
+        for (id, header) in headers.iter() {
+            let card = std::iter::successors(header.fader.scale.parent(), |w| w.parent())
+                .find(|w| w.has_css_class("openwave-mix-header"))
+                .unwrap();
+            let width = |w: &gtk::Widget| w.measure(gtk::Orientation::Horizontal, -1).0;
+            let slider = width(header.fader.scale.upcast_ref());
+            let with = width(&card);
+            header.fader.widget.set_visible(false);
+            let without = width(&card);
+            header.fader.widget.set_visible(true);
+            assert!(slider >= 110, "{id} master slider {slider}px");
+            assert_eq!(with, without, "{id} master fader widens the header");
         }
     }
 }

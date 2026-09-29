@@ -153,6 +153,10 @@ From a built checkout, use `./target/debug/openwave --hide`. A hidden launch req
 
 Open **Application menu → Settings → Tray icon color** to choose **White** (the default) or **Black** for your panel. The choice is saved across launches. When a connected microphone is muted, the tray icon turns **red**; after unmuting, it returns to your selected color. A disconnected device keeps the selected color, with its disconnected status shown in the tooltip.
 
+### Reload the interface
+
+If the window shows stale or glitched controls, choose **Application menu → Reload interface**. It rebuilds the mixer matrix and device panel from the current state inside the running app; audio routing, mixes and device connections are not interrupted and no settings are re-applied.
+
 ### Upgrade existing launchers
 
 New menu/autostart entries use a stable profile launcher when it is proven to start this installation. Entries from an earlier native build may instead contain that build's canonical executable path. Keep the previous installation available and inspect a confirmed handoff before deleting it or garbage-collecting its Nix generation:
