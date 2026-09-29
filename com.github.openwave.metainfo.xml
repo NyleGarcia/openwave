@@ -4,38 +4,26 @@
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>MIT</project_license>
   <name>OpenWave</name>
-  <summary>The audio mixing matrix for Linux</summary>
+  <summary>Control Elgato Wave hardware and route application audio</summary>
   <description>
-    <p>
-      Per-app mixes with per-mix outputs, plus native control of Elgato Wave
-      hardware — the Wave XLR interface (original and MK.2/XLR Dock) and the
-      Wave:3 microphone. A reverse-engineered replacement for Elgato Wave
-      Link, built with GTK4 and libadwaita on PipeWire.
-    </p>
-    <p>
-      Sources are rows, mixes are columns, and each cell is how much of that
-      source the mix receives. Applications are matched by name, hardware
-      microphones get their own rows automatically, microphone groups keep
-      one mic live at a time, every mix can feed its own output device or be
-      captured as a virtual microphone, and levels survive a reboot.
-    </p>
+    <p>OpenWave is a GTK4 and libadwaita control panel for Elgato Wave audio
+    hardware on Linux, with a PipeWire mixing matrix for application and
+    device sources. Route sources to independent mixes and output devices.</p>
+    <p>Native installations support user-managed hardware permissions and
+    background services. The experimental Flatpak supplies the panel and
+    routing tools only; host hardware permissions and services must be
+    configured outside the sandbox.</p>
   </description>
   <launchable type="desktop-id">openwave.desktop</launchable>
-  <url type="homepage">https://github.com/NyleGarcia/openwave</url>
-  <url type="bugtracker">https://github.com/NyleGarcia/openwave/issues</url>
-  <screenshots>
-    <screenshot type="default">
-      <caption>The mixing matrix with grouped microphones and three mixes</caption>
-      <image>https://raw.githubusercontent.com/NyleGarcia/openwave/main/docs/screenshot.png</image>
-    </screenshot>
-  </screenshots>
+  <url type="homepage">https://github.com/rikkichy/openwave</url>
+  <url type="bugtracker">https://github.com/rikkichy/openwave/issues</url>
   <categories>
     <category>AudioVideo</category>
     <category>Audio</category>
     <category>Mixer</category>
   </categories>
-  <developer id="com.github.nylegarcia">
-    <name>OpenWave contributors</name>
+  <developer id="io.github.rikkichy">
+    <name>rikkichy and OpenWave contributors</name>
   </developer>
   <recommends>
     <control>pointing</control>
@@ -48,10 +36,19 @@
   </supports>
   <content_rating type="oars-1.1"/>
   <releases>
-    <release version="1.2.1" date="2026-09-03"/>
-    <release version="1.2.0" date="2026-09-01"/>
-    <release version="1.1.0" date="2026-08-30"/>
-    <release version="1.0.0" date="2026-05-25"/>
-    <release version="0.1.5" date="2026-04-14"/>
+    <release version="1.1.1" date="2026-09-10">
+      <description>
+        <p>Fix process-test isolation on CI runners and preserve package ownership
+        detection for missing files during interrupted removal and retry.</p>
+      </description>
+    </release>
+    <release version="1.1.0" date="2026-09-10">
+      <description>
+        <p>Breaking release: the Python implementation is replaced by native Rust
+        executables for x86-64 Linux. Update Python-based launch and service commands.</p>
+        <p>Expanded device support, dynamic mixes, scenes, capture processing,
+        safer ownership and shutdown, and confirmed installation removal.</p>
+      </description>
+    </release>
   </releases>
 </component>

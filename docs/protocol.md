@@ -1,108 +1,74 @@
-# The Elgato Wave vendor protocol
+# Elgato Wave control protocol
 
-What OpenWave knows about the USB protocol the Wave devices speak, as
-implemented in [`wavexlr/device.py`](../wavexlr/device.py) and parameterised
-per model in [`wavexlr/profiles.py`](../wavexlr/profiles.py). Per-device
-support status lives in [hardware-support.md](hardware-support.md).
+This is an engineering reference for the profiles enabled in OpenWave, derived from reverse engineering rather than a vendor specification. It describes implemented offsets, not a physical-validation certificate. The exact profile table is [`openwave_core::profiles::PROFILES`](../crates/openwave-core/src/profiles.rs); [`openwave_core::protocol`](../crates/openwave-core/src/protocol.rs) validates and encodes supported fields, and [`openwave_runtime::device::VendorDevice`](../crates/openwave-runtime/src/device.rs) owns native USB transfers. See [hardware support](hardware-support.md) for the exact PID scope and cautions.
 
-Provenance: reverse-engineered from the macOS Wave Link application using
-Frida, then verified byte-for-byte against live hardware with
-`python3 -m wavexlr.probe`. Nothing here is from vendor documentation.
+## Transport and ownership
 
-## Transport
-
-Everything is USB Class control transfers on endpoint 0:
+The vendor configuration protocol uses USB Class control transfers on endpoint 0:
 
 | Field | Read | Write |
 |---|---|---|
-| `bmRequestType` | `0xA1` (class, interface, IN) | `0x21` (class, interface, OUT) |
+| `bmRequestType` | `0xA1` (class/interface/IN) | `0x21` (class/interface/OUT) |
 | `bRequest` | `0x85` | `0x05` |
-| `wValue` | selects the block (below) | selects the block |
+| `wValue` | Block selector | Block selector |
 | `wIndex` | `0x3303` | `0x3303` |
 
-### Why `wIndex=0x3303`
+Wave Link's `0x3300` addresses interface 0, owned by Linux's `snd-usb-audio`. The enabled profiles use `0x3303`, retaining the protocol's `0x33` prefix while targeting interface 3. OpenWave does not detach the audio driver for these transfers. This technique is profile-specific, not a guarantee that arbitrary transfers cannot disrupt hardware.
 
-Wave Link uses `wIndex=0x3300`, whose low byte routes the transfer through
-interface 0 — owned by `snd-usb-audio` on Linux, which blocks it. The
-firmware only checks the `0x33` prefix, so OpenWave sends `0x3303`: the
-kernel sees interface 3 (unclaimed) and lets it through. No driver detach,
-audio never interrupted.
+Only one process should own vendor transfers to a unit. A competing GUI, diagnostic collector or probe can produce `-EIO`/read failures. Quit OpenWave **including its tray process** before probing or using diagnostics with `--device`. Native vendor-control clients acquire `Lease::vendor_control`; the lease does not make an unrelated third-party client safe to run concurrently. Within the runtime, `DeviceManager` gives each captured `UnitId` a serialized queue for polling and writes. Selection changes cannot retarget queued work, and retirement drains the queue before disconnect. This ownership must not be bypassed by another USB client.
 
-### One process at a time
+Writes are whole-block read-modify-write operations: read the profile's config, patch a supported field, write the block. Preserve all other bytes. No offset is safe merely because a similarly named product uses it.
 
-The firmware services vendor transfers from a single process. A second
-reader gets `-EIO`; quit OpenWave (tray icon included) before probing.
+## Blocks and encodings
 
-### Writes are read-modify-write
+All multibyte fields below are little-endian.
 
-There is no per-field write. OpenWave reads the whole config block, patches
-the field, and writes the whole block back.
-
-## Blocks
-
-Three `wValue`-selected blocks, same on every model (lengths differ):
-
-| Block | `wValue` | Wave XLR / Dock | Wave:3 |
+| Block | `wValue` | `007d` / `00a6` length | `0070` length |
 |---|---|---|---|
-| config | `0x0000` | 34 bytes | 16 bytes |
-| meter | `0x0001` | 10 bytes | 8 bytes |
-| devinfo | `0x000A` | 51 bytes | 64 bytes |
+| Config | `0x0000` | 34 bytes | 16 bytes |
+| Meter | `0x0001` | 10 bytes | 8 bytes |
+| Device info | `0x000A` | 51 bytes | 64 bytes |
 
-The meter block starts with two little-endian uint32 levels (left, right).
+The meter begins with two unsigned 32-bit raw levels; their PCM normalization is unverified. Native UI meters use captured PCM instead of treating these vendor integers as linear gain. Device-info API version is at bytes 0–1. XLR-profile firmware is at 6–8 and serial at 27–46; Wave:3 firmware is at 21–23 and serial at 36–47.
 
-## Config block — Wave XLR and Wave XLR MK.2 / XLR Dock
+### XLR profiles: `0fd9:007d` and `0fd9:00a6`
 
-`0fd9:007d` and `0fd9:00a6` share this layout byte for byte (the MK.2/Dock
-was verified against live hardware). 34 bytes.
+| Offset | Type | Field |
+|---|---|---|
+| 0 | uint16 | Gain: raw / 256 dB; maximum `0x5000` (80 dB) |
+| 4 | byte | Mute: `1` muted, `0` live |
+| 6 | byte | 48 V phantom: `1` on, `0` off |
+| 9 | int16 | Headphone level: raw / 256 dB; zero is unity |
+| 14 | byte | Knob mode: `2` selects headphone volume |
+| 33 | byte | Low impedance mode: `1` on, `0` off |
 
-| Offset | Size / type | Field | Encoding |
-|---|---|---|---|
-| 0 | uint16 LE | Mic gain | 256 raw units per dB; max `0x5000` = 80 dB. Measured against the ALSA `Mic Capture Volume` control at 20/40/60/75 dB: `0x1400`/`0x2800`/`0x3C00`/`0x4B00`, exactly 256.00 raw/dB at every point |
-| 4 | byte | Mute | `0x01` muted, `0x00` live |
-| 6 | byte | 48 V phantom power | `0x01` on, `0x00` off. Found by watching the block while the dial was held: byte 6 flipped with the 48V LED and nothing else moved |
-| 9 | int16 LE | Headphone volume | Q8.8 dB (raw / 256), 0 = unity, negative = attenuation |
-| 14 | byte | Knob mode | `0x02` = knob drives headphone volume |
-| 33 | byte | Low impedance mode | `0x01` on, `0x00` off |
+The `00a6` profile uses this layout. That does not extend it to `00c7`, `00b6` or every device sold as a Dock/MK.2.
 
-Devinfo (51 bytes): API version at bytes 0–1 (`major.minor`), firmware at
-6–8 (`x.y.z`), serial as ASCII at 27–46.
+### Wave:3: `0fd9:0070`
 
-## Config block — Wave:3
+| Offset | Type | Field |
+|---|---|---|
+| 0 | uint16 | Gain: raw / 256 dB; maximum `0x2800` (40 dB) |
+| 4 | byte | Mute: `1` muted, `0` live |
+| 7 | int16 | Headphone level: raw / 256 dB |
+| 10 | uint16 | Microphone/PC mix: raw / 256 percent; maximum `0x6400` (100%) |
+| 12 | byte | Dial mode: `1` gain, `2` headphones, `3` monitor mix |
 
-`0fd9:0070`. 16 bytes.
+No phantom or low-impedance offset is defined for Wave:3. All unlisted bytes remain unknown/reserved.
 
-| Offset | Size / type | Field | Encoding |
-|---|---|---|---|
-| 0 | uint16 LE | Mic gain | 256 raw/dB; max `0x2800` = 40 dB |
-| 4 | byte | Mute | `0x01` muted |
-| 7 | int16 LE | Headphone volume | Q8.8 dB |
-| 10 | uint16 LE | Monitor mix | Q8.8 percent, max `0x6400` = 100 — the mic/PC crossfade |
-| 12 | byte | Dial mode | `0x01` = gain, `0x02` = headphones, `0x03` = monitor mix |
+## Engineer-only probe
 
-Devinfo (64 bytes): API at 0–1, firmware at 21–23, serial at 36–47.
+Use the native [`openwave-probe`](../crates/openwave-runtime/src/probe.rs) executable with dependencies and USB permissions already configured. From a source checkout, first build the sibling executables with `cargo build --locked --workspace --bins`, then use `target/debug/openwave-probe` in place of `openwave-probe` below. The probe has no per-unit selection flag: it connects to the first supported unit in bus/address order. **Use only one connected supported unit when investigating a specific device**, and verify the printed model, VID:PID and bus/address before proceeding. Do not use it as a multi-device control interface.
 
-## Probing a device
+Read-oriented commands:
 
-`python3 -m wavexlr.probe` is the tool everything above was verified with:
-
-```bash
-python3 -m wavexlr.probe dump                    # config/meter/devinfo, hexdumped,
-                                                 # with expected-vs-actual lengths
-python3 -m wavexlr.probe dump --wvalue 0x2 --len 512   # explore an unknown block
-python3 -m wavexlr.probe watch                   # poll config, print per-offset
-                                                 # diffs while you move controls
-python3 -m wavexlr.probe poke --noop             # write the block back unchanged
-                                                 # (proves writes are accepted)
-python3 -m wavexlr.probe poke --offset 6 --byte 0x01   # flip one byte (confirms)
+```sh
+openwave-probe dump
+openwave-probe watch --interval 0.1
 ```
 
-The method that mapped every field above: `watch`, move exactly one physical
-control, read which offset moved. Then `poke` the offset and confirm the
-hardware reacts. `poke --noop` first — a device that rejects a full-block
-write-back is telling you the layout is wrong before you change anything.
+`dump` reports expected versus returned lengths for config/meter/device-info blocks. `watch` prints changed byte offsets while you move one physical control at a time; Ctrl+C stops it. Dumps can contain serials and are not privacy-redacted. Custom `dump --wvalue 0xN --len N` requests are protocol research, not a general device-health check.
 
-Mapping a new device is: add a `DeviceProfile` to `profiles.py` (copy the
-closest existing one), `dump` to check the block lengths, `watch` to map
-offsets, `poke` to confirm. See
-[hardware-support.md](hardware-support.md#wave-xlr-mk2-00b6-revision) for
-the device we are currently looking for.
+**`poke` writes hardware. Even `poke --noop` sends a full config write.** Its unchanged payload can still trigger firmware side effects; it is not a read-only verification command. The interface is `poke --offset N --byte VALUE`, or `poke --noop` without offset/byte. Both forms prompt for confirmation unless `--yes` is supplied. The config is read after consent, then written and read back for byte-for-byte verification. Do not write unknown offsets, copy byte numbers across profiles, or demonstrate writes by toggling phantom power. Disconnect sensitive equipment and establish the exact target/layout before any controlled write experiment.
+
+A successful unchanged write does not establish that unknown fields are safe or that another PID is compatible. New hardware support requires independently reviewed identity, block and field evidence before enabling writes.

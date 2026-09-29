@@ -1,69 +1,77 @@
-# Built by release.yml, which substitutes @VERSION@ from the tag and
-# feeds the release tarball in as Source0. noarch: pure Python.
-#
-# The module tree deliberately does NOT go into %{python3_sitelib}: this
-# rpm is built on the release runner, not on Fedora, and a noarch package
-# hardcoding one Fedora release's python3.X path would break on the next.
-# Instead the tree lives under /usr/share/openwave and the two launchers
-# carry PYTHONPATH — the same shape the Nix package uses for the same
-# reason.
-
+# Fedora 43 native payload; not a universal RHEL/openSUSE binary package.
+# Version is supplied by packaging/build-release.sh from the checked VERSION.
 Name:           openwave
-Version:        @VERSION@
+Version:        %{openwave_version}
 Release:        1%{?dist}
-Summary:        The audio mixing matrix for Linux
+Summary:        Elgato Wave control panel and PipeWire mixing matrix
 License:        MIT
-URL:            https://github.com/NyleGarcia/openwave
-BuildArch:      noarch
-# @SRCVER@ is the tarball's own version string, which for a dispatch
-# dry-run contains characters (0.0.0-dev.<sha>) rpm's Version cannot.
-Source0:        openwave-@SRCVER@.tar.gz
-
-Requires:       python3 >= 3.10
-Requires:       python3-gobject
-Requires:       gtk4
-# Adw.Dialog and Adw.AlertDialog are 1.5 API; 1.4 cannot run the app.
+URL:            https://github.com/rikkichy/openwave
+ExclusiveArch:  x86_64
+Source0:        openwave-%{version}.tar.gz
+BuildRequires:  gcc
+BuildRequires:  gcc-c++
+BuildRequires:  clang
+BuildRequires:  make
+BuildRequires:  pkgconf-pkg-config
+BuildRequires:  gtk4-devel >= 4.14
+BuildRequires:  libadwaita-devel >= 1.5
+BuildRequires:  libusb1-devel
+BuildRequires:  desktop-file-utils
+BuildRequires:  libappstream-glib
+# The release builder installs the checksummed standalone Rust 1.98.1 on PATH.
+# Do not select distro cargo macros, which can bypass that exact toolchain.
+Requires:       gtk4 >= 4.14
 Requires:       libadwaita >= 1.5
 Requires:       adwaita-icon-theme
+Requires:       polkit
 Requires:       libusb1
+Requires:       pipewire
 Requires:       pipewire-utils
 Requires:       wireplumber
 Requires:       alsa-utils
 Requires:       pulseaudio-utils
-Requires:       polkit
-Recommends:     python3-xlib
-Recommends:     ladspa-swh-plugins
+Requires:       ladspa-swh-plugins
 
 %description
-Per-app mixes with per-mix outputs, plus native control of Elgato Wave
-hardware - the Wave XLR interface (original and MK.2/XLR Dock) and the
-Wave:3 microphone. A reverse-engineered replacement for Elgato Wave
-Link, built with GTK4 and libadwaita on PipeWire.
+Control Elgato Wave audio hardware and route application and device sources
+through independent PipeWire mixes and output devices. This native package
+is built for Fedora 43 on its matching architecture.
 
 %prep
-%autosetup -n openwave-@SRCVER@
+%autosetup
+
+%build
+export CARGO_NET_OFFLINE=true
+export CARGO_TARGET_DIR=target
+make build CARGO_BUILD_FLAGS='--release --frozen --offline --workspace --bins'
 
 %install
-make install DESTDIR=%{buildroot} PREFIX=/usr PYTHON=python3 \
-    SITEPKG=/usr/share/openwave/site-packages
-# The generated launchers assume the module is importable; put the
-# install's own tree on the path.
-sed -i 's|exec python3|exec env PYTHONPATH=/usr/share/openwave/site-packages python3|' \
-    %{buildroot}/usr/bin/openwave %{buildroot}/usr/bin/openwave-daemon
+make install DESTDIR="%{buildroot}" PREFIX=/usr INSTALL_METHOD=rpm \
+    BINARY_DIR=target/release \
+    CARGO_BUILD_FLAGS='--release --frozen --offline --workspace --bins'
+
+%check
+desktop-file-validate %{buildroot}/usr/share/applications/openwave.desktop
+appstream-util validate-relax --nonet %{buildroot}/usr/share/metainfo/com.github.openwave.metainfo.xml
 
 %files
-%license LICENSE
 /usr/bin/openwave
 /usr/bin/openwave-daemon
+/usr/bin/openwave-diag
+/usr/bin/openwave-probe
+/usr/libexec/openwave-maintenance
 /usr/share/openwave/
 /usr/share/applications/openwave.desktop
 /usr/share/metainfo/com.github.openwave.metainfo.xml
 /usr/share/icons/hicolor/scalable/apps/openwave.svg
-/usr/share/icons/hicolor/symbolic/apps/openwave-symbolic.svg
-/usr/share/icons/hicolor/symbolic/apps/openwave-muted-symbolic.svg
-/usr/share/icons/hicolor/symbolic/apps/openwave-attention-symbolic.svg
-/usr/share/doc/openwave/
-/usr/share/licenses/openwave/
+/usr/share/icons/hicolor/scalable/status/openwave-white.svg
+/usr/share/icons/hicolor/scalable/status/openwave-black.svg
+/usr/share/icons/hicolor/scalable/status/openwave-red.svg
+%doc /usr/share/doc/openwave/
+%license /usr/share/licenses/openwave/
 
 %changelog
-# Release notes live in CHANGELOG.md and the GitHub Releases page.
+* Wed Sep 09 2026 OpenWave contributors - 1.0.0-1
+- Replace the Python runtime with the pinned Rust workspace and native helpers.
+- Preserve saved state and ownership-checked installation and removal.
+- Handle absent systemd units and optional HOME defaults; refresh capture-service status after setup.

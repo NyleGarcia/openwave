@@ -1,7 +1,8 @@
 [Desktop Entry]
 Name=OpenWave
-Comment=The audio mixing matrix for Linux
+Comment=Elgato Wave Control for Linux
 Exec=openwave --hide
-Icon=audio-input-microphone
+Icon=openwave
 Type=Application
-Categories=Audio;Settings;
+Categories=AudioVideo;Audio;Mixer;
+Terminal=false

@@ -1,100 +1,163 @@
 {
-  description = "OpenWave - The audio mixing matrix for Linux";
+  description = "OpenWave - Linux control app for the Elgato Wave XLR";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+  inputs.rust-overlay = {
+    url = "github:oxalica/rust-overlay";
+    inputs.nixpkgs.follows = "nixpkgs";
+  };
 
-  outputs =
-    { self, nixpkgs }:
+  outputs = { self, nixpkgs, rust-overlay }:
     let
-      forAllSystems = nixpkgs.lib.genAttrs [ "x86_64-linux" "aarch64-linux" ];
-    in
-    {
-      packages = forAllSystems (
-        system:
+      forAllSystems = nixpkgs.lib.genAttrs [ "x86_64-linux" ];
+      environment = system:
         let
-          pkgs = nixpkgs.legacyPackages.${system};
-          pythonEnv = pkgs.python3.withPackages (ps: [ ps.pygobject3 ps.xlib ]);
-          sitePkgs = pkgs.python3.sitePackages; # "lib/python3.X/site-packages"
-          usbLibs = pkgs.lib.makeLibraryPath [ pkgs.libusb1 ];
-        in
-        rec {
-          openwave = pkgs.stdenv.mkDerivation {
+          pkgs = import nixpkgs {
+            inherit system;
+            overlays = [ rust-overlay.overlays.default ];
+          };
+          toolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
+        in {
+          inherit pkgs toolchain;
+          rustPlatform = pkgs.makeRustPlatform { cargo = toolchain; rustc = toolchain; };
+          libraries = with pkgs; [ gtk4 libadwaita libusb1 pipewire ];
+          runtimeTools = with pkgs; [ alsa-utils pipewire wireplumber pulseaudio ];
+          smokeTools = with pkgs; [
+            bubblewrap xorg-server xauth dbus xdotool imagemagick
+            flatpak flatpak-builder ostree podman jq curl git
+            desktop-file-utils appstream at-spi2-core util-linux procps
+          ];
+        };
+      # Explicit source roots also protect path:. builds (which include ignored
+      # files). Local guidance, credentials, build trees and caches never enter
+      # either the Cargo vendor derivation or the application derivation.
+      source = nixpkgs.lib.cleanSourceWith {
+        src = ./.;
+        filter = path: type:
+          let
+            lib = nixpkgs.lib;
+            relative = lib.removePrefix (toString ./. + "/") (toString path);
+            parts = lib.splitString "/" relative;
+            root = builtins.head parts;
+            name = baseNameOf path;
+            roots = [ "crates" "data" "docs" "icons" "packaging" "pipewire" "wireplumber" ];
+            files = [
+              "Cargo.toml" "Cargo.lock" "rust-toolchain.toml" "VERSION" "Makefile"
+              "PKGBUILD" "LICENSE" "README.md" "wavexlr.desktop"
+              "openwave-autostart.desktop" "com.github.openwave.metainfo.xml"
+            ];
+            excluded = component:
+              lib.hasPrefix "." component || builtins.elem component [
+                "target" "vendor" "node_modules" "__pycache__" "build" "result"
+                "AGENTS.md" "CLAUDE.md"
+              ];
+          in
+            !(lib.any excluded parts)
+            && (builtins.elem root roots || builtins.elem relative files)
+            && (type == "directory" || type == "regular")
+            && lib.cleanSourceFilter path type;
+      };
+    in {
+      packages = forAllSystems (system:
+        let
+          e = environment system;
+          inherit (e) pkgs;
+          runtimeBins = pkgs.lib.makeBinPath e.runtimeTools;
+        in rec {
+          openwave = e.rustPlatform.buildRustPackage {
             pname = "openwave";
-            version = "1.0.0";
-            src = self;
-
-            nativeBuildInputs = with pkgs; [
-              makeWrapper
-              wrapGAppsHook4
-              gobject-introspection
-            ];
-            buildInputs = with pkgs; [
-              gtk4
-              libadwaita
-            ];
-
-            dontBuild = true;
-            # The Makefile derives SITEPKG from the interpreter, which is
-            # a read-only store path here -- override it onto $out and
-            # point the generated launcher at the pygobject python.
-            installFlags = [
-              "PREFIX=${placeholder "out"}"
-              "SITEPKG=${placeholder "out"}/${sitePkgs}"
-              "PYTHON=${pythonEnv}/bin/python3"
-            ];
-
-            # Declarative version of the rule wavexlr/setup.py writes on
-            # first run -- consume via services.udev.packages on NixOS
-            # and the in-app permission check passes out of the box.
-            #
-            # Generated from setup.py's UDEV_RULES rather than restated, because
-            # udev_installed() requires *every* product ID to be present, and
-            # both it and the rules now derive from profiles.PROFILES — a new
-            # device cannot be missing from either. (The old literal_eval AST
-            # extraction is gone: UDEV_RULES is computed, so it is imported.)
-            # On NixOS the in-app pkexec cannot write the rule regardless,
-            # since /etc/udev/rules.d/99-openwave.rules would be a read-only
-            # store symlink — consume this via services.udev.packages instead.
-            postInstall = ''
-              mkdir -p $out/lib/udev/rules.d
-              PYTHONPATH=$out/${sitePkgs} ${pythonEnv}/bin/python3 -c \
-                'from wavexlr.setup import UDEV_RULES; print("\n".join(UDEV_RULES))' \
-                > $out/lib/udev/rules.d/99-openwave.rules
-
-              # setup.py looks for the WirePlumber and mix-sink configs next to
-              # the source tree, then under /usr/local and /usr. The Makefile put
-              # them in $out/share/openwave, so on Nix all three candidates miss
-              # and run_setup() dies with "WirePlumber rule source not found".
-              # Retarget the FHS prefix at the real one; $out/share/openwave is
-              # simply what PREFIX=/usr would have produced here.
+            version = pkgs.lib.removeSuffix "\n" (builtins.readFile ./VERSION);
+            src = source;
+            cargoLock.lockFile = ./Cargo.lock;
+            cargoBuildFlags = [ "--workspace" "--bins" ];
+            cargoTestFlags = [ "--workspace" ];
+            nativeBuildInputs = with pkgs; [ pkg-config makeWrapper wrapGAppsHook4 ];
+            nativeCheckInputs = with pkgs; [ dbus bubblewrap ];
+            buildInputs = e.libraries;
+            installPhase = ''
+              runHook preInstall
+              make install PREFIX="$out" INSTALL_METHOD=nix \
+                BINARY_DIR="target/${pkgs.stdenv.hostPlatform.rust.rustcTarget}/release"
+              mkdir -p "$out/lib/udev/rules.d"
+              "$out/libexec/openwave-maintenance" udev-rules > "$out/lib/udev/rules.d/99-openwave.rules"
+              runHook postInstall
             '';
-
-            # ctypes needs to find libusb; the module tree needs to be on
-            # PYTHONPATH since it lives in $out, not inside the python env.
+            # Manager ownership outranks the pre-wrapper receipt hashes.
             dontWrapGApps = true;
             preFixup = ''
-              wrapProgram $out/bin/openwave \
-                --prefix PYTHONPATH : $out/${sitePkgs} \
-                --prefix LD_LIBRARY_PATH : ${usbLibs} \
+              wrapProgram "$out/bin/openwave" \
+                --prefix PATH : ${runtimeBins} \
+                --prefix LADSPA_PATH : ${pkgs.ladspaPlugins}/lib/ladspa \
+                --prefix XDG_DATA_DIRS : ${pkgs.adwaita-icon-theme}/share \
                 "''${gappsWrapperArgs[@]}"
-
-              # The Makefile installs this launcher too; it just needs the same
-              # import path as the GUI one. service.py points ExecStart at it.
-              wrapProgram $out/bin/openwave-daemon \
-                --prefix PYTHONPATH : $out/${sitePkgs} \
-                --prefix LD_LIBRARY_PATH : ${usbLibs}
+              for launcher in openwave-daemon openwave-diag openwave-probe; do
+                wrapProgram "$out/bin/$launcher" \
+                  --prefix PATH : ${runtimeBins} \
+                  --prefix LADSPA_PATH : ${pkgs.ladspaPlugins}/lib/ladspa
+              done
             '';
-
             meta = {
-              description = "The audio mixing matrix for Linux — per-app mixes, per-mix outputs, Elgato Wave control";
+              description = "Linux control application for Elgato Wave devices";
               homepage = "https://github.com/rikkichy/openwave";
               license = pkgs.lib.licenses.mit;
               mainProgram = "openwave";
-              platforms = pkgs.lib.platforms.linux;
+              platforms = [ "x86_64-linux" ];
             };
           };
           default = openwave;
-        }
-      );
+        });
+
+      checks = forAllSystems (system:
+        let
+          e = environment system;
+          inherit (e) pkgs;
+          package = self.packages.${system}.openwave;
+        in {
+          native = package;
+          installed = pkgs.runCommand "openwave-installed-native-proof" {
+            nativeBuildInputs = e.smokeTools ++ e.runtimeTools;
+          } ''
+            export HOME="$TMPDIR/home"
+            export XDG_CONFIG_HOME="$HOME/config" XDG_DATA_HOME="$HOME/data"
+            export XDG_STATE_HOME="$HOME/state" XDG_RUNTIME_DIR="$HOME/run"
+            mkdir -p "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$XDG_STATE_HOME" "$XDG_RUNTIME_DIR"
+            chmod 700 "$HOME" "$XDG_RUNTIME_DIR"
+            cd "$TMPDIR"
+            for binary in openwave openwave-daemon openwave-diag; do
+              ${package}/bin/$binary --help
+              expected="$binary"
+              test "$(${package}/bin/$binary --version)" = "$expected ${package.version}"
+            done
+            ${package}/bin/openwave-probe --help
+            test -s ${package}/share/openwave/style.css
+            test -s ${package}/lib/udev/rules.d/99-openwave.rules
+            mkdir -p "$out"
+            printf '%s\n' '${system}: built and executed installed native informational paths' > "$out/result"
+          '';
+        });
+
+      devShells = forAllSystems (system:
+        let e = environment system; inherit (e) pkgs toolchain;
+        in {
+          default = pkgs.mkShell {
+            name = "openwave-dev";
+            packages = (with pkgs; [
+              toolchain llvmPackages.clang llvmPackages.clang-tools llvmPackages.lld
+              llvmPackages.lldb gdb pkg-config cmake meson ninja gnumake
+              nixd nixfmt shellcheck actionlint sccache
+            ]);
+            buildInputs = e.libraries;
+            OPENWAVE_DEV_SHELL = "1";
+            RUST_SRC_PATH = "${toolchain}/lib/rustlib/src/rust/library";
+            LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
+            RUST_BACKTRACE = "1";
+            shellHook = ''
+              export PATH="${pkgs.lib.makeBinPath (e.runtimeTools ++ e.smokeTools)}:$PATH"
+              export XDG_DATA_DIRS="${pkgs.gtk4}/share/gsettings-schemas/${pkgs.gtk4.name}:${pkgs.gsettings-desktop-schemas}/share/gsettings-schemas/${pkgs.gsettings-desktop-schemas.name}:${pkgs.adwaita-icon-theme}/share:${pkgs.at-spi2-core}/share''${XDG_DATA_DIRS:+:$XDG_DATA_DIRS}"
+              export LADSPA_PATH="${pkgs.ladspaPlugins}/lib/ladspa''${LADSPA_PATH:+:$LADSPA_PATH}"
+            '';
+          };
+        });
+      formatter = forAllSystems (system: nixpkgs.legacyPackages.${system}.nixfmt);
     };
 }

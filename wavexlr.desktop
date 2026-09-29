@@ -1,10 +1,8 @@
 [Desktop Entry]
-Type=Application
 Name=OpenWave
-Comment=The audio mixing matrix for Linux
+Comment=Elgato Wave Control for Linux
 Exec=openwave
 Icon=openwave
+Type=Application
 Categories=AudioVideo;Audio;Mixer;
 Terminal=false
-StartupWMClass=com.github.openwave
-X-GNOME-UsesNotifications=true

@@ -1,527 +1,283 @@
-# OpenWave
+<p align="center">
+  <img src="icons/openwave.svg" alt="OpenWave logo" width="128" height="128">
+</p>
 
-[![Tests](https://github.com/NyleGarcia/openwave/actions/workflows/tests.yml/badge.svg)](https://github.com/NyleGarcia/openwave/actions/workflows/tests.yml)
-[![Release](https://github.com/NyleGarcia/openwave/actions/workflows/release.yml/badge.svg)](https://github.com/NyleGarcia/openwave/actions/workflows/release.yml)
-[![AUR version](https://img.shields.io/aur/version/openwave)](https://aur.archlinux.org/packages/openwave)
+<h1 align="center">OpenWave</h1>
 
-**The audio mixing matrix for Linux.** Per-app mixes with per-mix outputs, plus native control of **Elgato Wave** hardware — the **Wave XLR** interface (original and MK.2/XLR Dock) and the **Wave:3** microphone. A reverse-engineered replacement for Elgato Wave Link, built with GTK4 + Adwaita.
+<p align="center">
+  <strong>Elgato Wave controls, native to Linux.</strong><br>
+  Built with Rust, GTK4, and libadwaita.
+</p>
 
-![OpenWave](docs/screenshot.png)
+<p align="center">
+  <a href="#supported-devices">Supported devices</a> ·
+  <a href="#installation">Install</a> ·
+  <a href="#usage">Usage</a> ·
+  <a href="#how-it-works">How it works</a>
+</p>
 
-Sources are rows, mixes are columns, and each cell is how much of that source
-the mix receives. Above: an XLR Dock and an Arctis headset microphone grouped
-so only one is live at a time — the muted one is the red row — feeding a
-Personal Mix monitored on the headset, a Chat Mix published as a capture source
-for voice apps, and a Record Mix routed nowhere but still recordable.
-
-## Supported devices
-
-| Device | USB ID | Status | Controls |
-|---|---|---|---|
-| Wave XLR | `0fd9:007d` | 🟢 supported | Gain, mute, headphone volume, low impedance mode, **48 V phantom power**, knob-mode readout |
-| Wave XLR MK.2 / XLR Dock | `0fd9:00a6` | 🟢 supported | as the Wave XLR — it enumerates as "Elgato XLR Dock" and speaks the same vendor protocol, verified on hardware |
-| Wave:3 | `0fd9:0070` | 🟢 supported | Gain, mute, headphone volume, monitor mix, 3-way dial mode |
-| Wave XLR MK.2 (`00b6` revision) | `0fd9:00b6` | ⚪ not yet | a different MK.2 revision — UAC2, different control scheme, decoded by [CryoByte33/openwave](https://github.com/CryoByte33/openwave); deferred for lack of hardware |
-
-Details, per-control status and protocol notes:
-[docs/hardware-support.md](docs/hardware-support.md). Have an untested device?
-See [Reporting problems](#reporting-problems).
-
-Phantom power lives at offset 6 of the Wave XLR config block (`0x01` on,
-`0x00` off), found by diffing the block across a toggle and confirmed against
-the device's own +48V indicator. The Dock has no front-panel button for it at
-all, so on that hardware the app is the only way to switch it.
+OpenWave is an open-source, reverse-engineered alternative to Elgato Wave Link for controlling **Wave XLR**, **XLR Dock**, and **Wave:3** hardware on Linux. Adjust your microphone and headphones from a native desktop app, and route application and capture audio through a PipeWire mixing matrix. OpenWave is an independent project, not an Elgato product.
 
 ## Features
 
-### Mixing matrix
+- **Multiple devices** — Each supported unit has its own control queue, including two of the same model. The sidebar identifies units by serial, with USB bus/address as a runtime fallback. Selecting another unit does not retarget queued writes.
+- **Microphone controls** — Adjust gain and mute, with 48 V phantom power on supported XLR devices.
+- **Headphone controls** — Set volume, enable low impedance mode on supported devices, or adjust the Wave:3 monitor mix.
+- **Hardware and system sync** — Polling at 10 Hz tracks physical buttons and knobs. Hardware mute and headphone volume synchronize with PipeWire/ALSA.
+- **Hotplug and capture readiness** — Adding or removing a device preserves other connected units. The daemon maintains a keepalive per Wave input; the mixer requires raw capture readiness before Wave playback.
+- **Dynamic mixing** — Add application or hardware sources, independent mixes, per-send levels and outputs, with published capture inputs for OBS and voice applications.
+- **Scenes and remote controls** — Recall matrix levels and serial-bound hardware settings, or control the running app through typed session-bus actions. Scenes never include phantom power.
+- **Capture DSP** — Low cut, gate, compression, EQ, delay and optional mono, with cancellable raw-input calibration and explicit proposal acceptance.
+- **System tray and setup** — Keep OpenWave in the background, configure login preferences, and manage native USB/audio integration. Health monitoring is observation-only unless daemon recovery is explicitly enabled.
 
-- **Sources × mixes grid** — user-defined mixes as columns, sources as rows.
-  Each cell is how much of that source the mix receives; each source row
-  carries a trim applying everywhere, with a per-cell mute on every send.
-  See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
-- **Sources** — an application matched by name (several names per row, so one
-  fader can cover every game or two music players), or a hardware capture
-  device such as a headset microphone. One row may be the catch-all for
-  anything unmatched. Every source and mix gets a pickable icon.
-- **Live level meters** — every source row meters its own audio, every mix
-  header meters what the mix carries, and a row waiting for its application
-  says so instead of sitting silent.
-- **Mix master sliders** — each column header carries its mix's master
-  volume. The slider follows outside movers too: whoever turns a master —
-  pavucontrol, a media key, a scene — the header shows it within seconds.
-- **Per-mix output** — every mix chooses its own output device from a menu:
-  *Automatic* (labelled with the device it resolved to), any live sink, or
-  *Not monitored* for a mix that exists only to be captured. A remembered
-  device that is currently absent stays selectable, marked "(unavailable)".
-  A mix keeps playing when the window is closed.
-- **Every mix is a microphone** — each mix is also published as a capture
-  source, so a voice app or OBS can select it as an input.
-- **Levels survive a reboot** — PipeWire recreates the mix sinks at unity on
-  every start and WirePlumber does not restore them. OpenWave remembers the
-  masters itself and puts them back. See [Mix levels and reboots](#mix-levels-and-reboots).
-- **Microphone rows appear by themselves** — every Elgato capture input gets a
-  row named after its device ("XLR Dock", "Wave XLR"), so two interfaces
-  connected at once are told apart instead of contending for a single
-  "microphone" row. They cannot be deleted, only muted.
-- **Microphone groups** — drag one microphone row onto another to group them.
-  Only one member of a group is live at a time and a single button hands the
-  group over to the next, which is what two microphones on one speaker
-  actually want; microphones in another group are untouched, so a second
-  speaker's microphone stays open. Two mics on one person and one on another
-  is two groups.
-- **Sensible defaults** — System, Game, Music, Browser and Voice rows ship
-  pre-matched to the usual applications, with System as the catch-all. An
-  empty mix says it carries nothing rather than looking broken.
-- **Scenes** — every trim, send, mute, output, master and device setting
-  saved under a name and recalled as one gesture, from the header-bar menu
-  or the session bus. A scene sets levels on the matrix that exists — it
-  never creates or deletes rows or columns, and one that names things since
-  removed applies what still matches. The gain lock wins over a scene's
-  gain.
-- **Remote control** — mixes, source trims, microphone groups and scenes
-  are drivable from outside the window over the session bus. See
-  [Remote control](#remote-control).
+## Supported devices
 
-### Device control
+|Device|USB ID|Available controls|
+|---|---|---|
+|**Wave XLR**|`0fd9:007d`|Gain, mute, 48 V phantom power, headphone volume, low impedance mode|
+|**XLR Dock** (`00a6` variant)|`0fd9:00a6`|Gain, mute, 48 V phantom power, headphone volume, low impedance mode|
+|**Wave:3**|`0fd9:0070`|Gain, mute, headphone volume, monitor mix|
 
-- **Microphone** — gain in dB with a **gain lock** (lock the slider so a stray
-  drag cannot blow out a dialled-in level), mute synced with the hardware
-  button, 48 V phantom power.
-- **Headphones** — volume synced with the hardware knob, low impedance mode,
-  and on a Wave:3 a **monitor mix** slider (mic/PC crossfade).
-- **Knob readout** — shows what the physical dial currently controls.
-- **Device info** — firmware version, protocol API version and serial number,
-  read from the device itself.
-- **Hardware sync** — 10 Hz polling keeps the app in sync with physical
-  controls; slider drags are throttled so the hardware tracks the drag
-  instead of hearing about it after.
-- **System integration** — mute and volumes sync bidirectionally with
-  PipeWire/ALSA, with ALSA controls discovered by name so a firmware revision
-  that renumbers them cannot break it.
-- **Per-microphone effects** — each capture row carries a DSP popover:
-  low cut (80/120 Hz), three-band tone EQ, alignment delay (sync your
-  mic to desktop audio in a recording), and forced mono. Built from
-  PipeWire's own filter-chain — nothing to install, no process running
-  while everything is neutral. Gate, compressor and AI noise removal are
-  on the roadmap as optional plugins.
-- **Hotplug** — a Wave plugged in after launch is picked up automatically.
-- **Multiple devices** — every connected Wave is opened, polled and
-  ALSA-synced at once, two of the same model included (told apart by USB
-  bus address and serial). A Device dropdown appears in the sidebar when
-  more than one is connected; the capture-fix daemon pins each device's
-  stream; scenes record hardware per serial; and the tray reports muted if
-  any device's hardware mute is down.
+Controls are enabled by the device profile. Phantom power and low impedance mode are available on the supported XLR models; monitor mix is available on Wave:3.
 
-### Reliability
+**The similarly named `0fd9:00c7` Dock variant is unverified and disabled.** A product name is not a compatibility guarantee. Enabled profiles do not imply validation of every firmware, the `00a6` unit, or physical multi-device operation for this release. See [hardware support](docs/hardware-support.md).
 
-- **Audio capture fix** — a background daemon (systemd or runit) prevents the
-  firmware race where the microphone goes silent, with a byte-flow watchdog
-  for a keepalive that wedged without dying. The sidebar warns when the
-  service is missing and can install — or uninstall — it in place.
-- **Stalled capture recovery** — a Wave replugged while the system runs can
-  come back claiming to be healthy while delivering no frames; OpenWave
-  detects that and reopens it. See [Stalled capture](#stalled-capture).
-- **Corrupt config survival** — an unreadable mix store is preserved as
-  `mixdefs.json.corrupt` and replaced with the defaults, so a bad write never
-  leaves the app with no mixes at all.
-- **Icon-theme resilience** — icon names Breeze lacks are substituted at draw
-  time, so the UI survives a non-default theme without rewriting your config.
+**Before enabling 48 V, check the selected unit and microphone's power requirements.** Scenes and calibration never change phantom power. Capture-to-USB control mapping requires an unambiguous physical identity; a recycled ALSA card number cannot identify a unit.
 
-### Desktop integration
+## Mixing
 
-- **System tray** — StatusNotifier icon with mute from the menu; the tooltip
-  distinguishes hardware mute, matrix mute, and both. On a desktop with no
-  tray host (stock GNOME), OpenWave shows its window instead of hiding into
-  nothing.
-- **App drawer, start at login, start in the tray** — all handled by switches
-  in the app; no files to copy. See
-  [App drawer, starting at login, starting in the tray](#app-drawer-starting-at-login-starting-in-the-tray).
-- **Responsive layout** — the device pane is a collapsible sidebar; the window
-  remembers its geometry (and a hidden window cannot clobber it).
-- **First-run setup** — configures udev permissions and the audio service
-  automatically, via polkit.
+- Add, rename, reorder or remove sources and mixes. Each source has a trim and each source-to-mix send has its own level/mute: effective send level is **trim × send**.
+- Saved source, send and master volumes keep Python's normalized `wpctl`/Pulse meaning. Existing values are not reinterpreted as linear PCM gain or rewritten during load.
+- Application streams are claimed by one source and moved into its intake, not copied alongside their original playback. A claimed application's zero sends mean silence; remove its binding or source to stop managing it.
+- Group alternative sources for exclusive switching. Unmuting one member mutes its peers; a group may also be entirely muted.
+- Choose an output per mix, or **Not monitored** for capture-only use. Personal defaults to Automatic; other mixes default to Not monitored. A missing explicitly selected output stays silent instead of moving sound to another device.
+- Select a published `openwave_capture_<mix_id>` input in OBS or a voice app. Successful master-level changes preserve its identity instead of reconnecting recording clients.
+- Scene recall is ordered best-effort, with partial failures reported, not a hardware-atomic transaction. It respects selected-device gain locks and serial-bound device identity.
+- SWH LADSPA provides gate/SC4 compression. Calibration measures raw capture without blocking GTK and applies nothing until explicit acceptance. Neutral settings bypass processing; an enabled chain that fails stays silent instead of exposing unprocessed audio.
 
-## How OpenWave compares
+Keep a voice application's return audio out of the mix selected as its microphone. Internal OpenWave nodes are not physical outputs, but external loopbacks and acoustic feedback still need careful routing. See [routing, scenes and remote control](docs/ARCHITECTURE.md).
 
-Two other projects live in the same space: [openxlr](https://github.com/emaspa/openxlr),
-a C#/.NET control suite for Elgato XLR interfaces on Linux, and Elgato's own
-**Wave Link** on Windows/macOS. Roughly: openxlr covers more XLR hardware
-variants (the Wave XLR Pro, the `00b6` MK.2) and adds host-side DSP and an
-OpenDeck plugin; Wave Link has the deepest effects stack and no Linux
-version; OpenWave covers the Wave:3, models mixing as one sources × mixes
-matrix with scenes and microphone groups, and runs on plain Python +
-PyGObject with no runtime to install. Pick openxlr for its hardware and
-DSP; pick OpenWave for the matrix.
+## Installation
 
-## How it works
+### Quick install
 
-Wave devices use USB Class control transfers on endpoint 0 for device configuration. On Linux, `snd-usb-audio` normally blocks these transfers because `wIndex=0x3300` routes through interface 0 (owned by the audio driver). OpenWave uses `wIndex=0x3303` instead — the firmware only checks the `0x33` prefix, while the kernel sees interface 3 (unclaimed) and lets the transfer through. No driver detach needed, audio is never interrupted.
-
-All supported devices speak the same vendor protocol (`bRequest` 0x85 read / 0x05 write) but with different config layouts; per-model constants live in `wavexlr/profiles.py`, and the full register maps are documented in [docs/protocol.md](docs/protocol.md). `python3 -m wavexlr.probe` (`dump` / `watch` / `poke`) verifies a device against its profile and helps map new fields. The device services vendor transfers from only one process at a time, so quit OpenWave before probing.
-
-The mixing half is a router built from ordinary PipeWire objects — null sinks
-and `pw-loopback` children, no custom audio code.
-[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) explains the routing model: why an
-application's audio is moved rather than copied, how trim and send compose, and
-why every stream gets exactly one owner.
-
-## Install
-
-Tagged releases on the [Releases page](../../releases) carry ready-made
-objects: a `.deb` for Debian/Ubuntu (`sudo apt install ./openwave_*.deb`),
-a source tarball, and checksums.
-
-### One-liner
-
-Detects Arch, Debian/Ubuntu, Fedora, openSUSE, or Void; installs deps and OpenWave:
+On a supported mutable distribution, review the installer before running it. Run as your login user, with `curl`, `git`, and `make` available:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/NyleGarcia/openwave/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/rikkichy/openwave/main/install.sh | sh
 ```
 
-### Arch Linux
+The installer supports **Arch, Debian/Ubuntu, Fedora, openSUSE, or Void** when the required library versions are available. It installs native dependencies and Rust **1.98.1**, then builds and stages the application as your login user. Only dependency installation and system-file copying request administrator authorization through sudo, doas or pkexec. The default prefix is `/usr/local`; final privileged copying uses a validated root-owned bootstrap, never an elevated Cargo build. **Do not run the installer or GUI as root, or use `sudo make install`.**
+
+### Install from a checkout
 
 ```bash
-yay -S openwave   # AUR
-```
-
-### From a checkout
-
-```bash
-git clone https://github.com/NyleGarcia/openwave.git
+git clone https://github.com/rikkichy/openwave.git
 cd openwave
-./install.sh                  # default PREFIX=/usr/local
-PREFIX=/usr ./install.sh      # for packaging-style layout
+./install.sh
 ```
 
-### Nix
-
-The repo is a flake exposing `packages.<system>.openwave` (also `default`)
-for `x86_64-linux` and `aarch64-linux`:
+For a packaging-style layout under `/usr`, use `PREFIX=/usr ./install.sh` instead of the last command. With dependencies already present, a user-prefix install is also supported:
 
 ```bash
-nix run github:NyleGarcia/openwave
-nix profile install github:NyleGarcia/openwave
+make install PREFIX="$HOME/.local"
 ```
 
-On NixOS, the package ships the udev rules the first-run setup would
-otherwise write (pkexec cannot write to the read-only store), so consume
-them declaratively:
+The native layout puts `openwave`, `openwave-daemon`, `openwave-diag` and `openwave-probe` in `<prefix>/bin`, the private `openwave-maintenance` helper in `<prefix>/libexec`, and assets plus the installation receipt in `<prefix>/share/openwave`. The helper is not a public command or a way to elevate a user-owned checkout.
 
-```nix
-services.udev.packages = [ openwave ];
-```
+`Makefile` supports `PREFIX`, `DESTDIR`, `BINARY_DIR` and `CARGO_BUILD_FLAGS`. It builds missing binaries in `target/release` by default and checks their version against canonical `VERSION`. `DESTDIR` is a separate absolute staging root, not a runtime prefix. Package builders must record the appropriate `INSTALL_METHOD`; a manual receipt cannot override package-manager ownership.
 
-### Bazzite / Fedora Atomic
+An existing installation is not blindly overwritten. The installer can retire a validated legacy application only after explicit confirmation, preserving settings and user integration. Ambiguous, modified or package-owned layouts require resolving the reported conflict first. Installation is not atomic: on interruption, retain the prepared inputs and follow the printed continuation instructions; never elevate a staged binary or an unverified bootstrap.
 
-Immutable images change what "install" means — see
-[docs/install-bazzite.md](docs/install-bazzite.md). Short version: run
-from a checkout (no build step, first-run setup works as-is since `/etc`
-is writable and the service is a user unit), layering only PyGObject if
-the image lacks it.
+### Build and run from source
 
-### Flatpak (experimental)
-
-A manifest lives at
-[`packaging/flatpak/com.github.openwave.yml`](packaging/flatpak/com.github.openwave.yml):
+With [Rustup](https://rustup.rs/) and the native development dependencies below available, build as an ordinary user from the checkout root:
 
 ```bash
-flatpak install --user flathub org.flatpak.Builder org.gnome.Platform//48 org.gnome.Sdk//48
-flatpak run org.flatpak.Builder --user --install --force-clean build-dir \
-    packaging/flatpak/com.github.openwave.yml
+rustup toolchain install 1.98.1 --profile minimal
+cargo build --locked --workspace --bins
+./target/debug/openwave
 ```
 
-Know the limits before choosing it: the sandbox cannot install udev rules
-(grant USB access once from a native install or by hand — see
-[docs/hardware-support.md](docs/hardware-support.md)) and cannot run the
-first-run setup or the capture-fix daemon, so those stay native. The
-manifest bundles the `pw-*`/`wpctl`/`amixer` tools the mixer shells out
-to and drives the host PipeWire through its socket. Prefer a native
-package where one exists.
-
-### Uninstall
-
-```bash
-sudo make -C /path/to/openwave uninstall PREFIX=/usr/local
-```
+`rust-toolchain.toml` pins Rust 1.98.1; `Cargo.lock` pins crate dependencies. Build **all workspace binaries**, not only the GUI: direct source runs need the sibling maintenance helper and daemon, as well as the checkout's assets and matching `VERSION`. Keep the checkout and build directory in place while a service refers to them. `make build` produces the release binaries instead. A Nix development environment is also available with `nix develop path:.`.
 
 ### Requirements
 
-- Python 3.10+
-- GTK4, libadwaita
-- PipeWire (for audio capture fix)
-- libusb 1.0
-- python-xlib *(optional)* — friendlier app names in the Add Source picker
-  for X11/XWayland apps that report a generic PipeWire name ("ALSA plug-in
-  [java]"); without it those rows fall back to the raw name
+- GTK **4.14+**, libadwaita **1.5+**, and Adwaita icons.
+- Supported release target: **x86-64 Linux**. Native package, CI, Nix and experimental Flatpak release inputs use this target.
+- libusb 1.0 and ALSA utilities (`aplay`, `amixer`).
+- PipeWire tools: `pipewire`, `pw-cat`, `pw-cli`, `pw-dump`, `pw-link`, `pw-loopback` and `pw-top`.
+- WirePlumber/`wpctl` and PulseAudio client tools/`pactl`.
+- SWH LADSPA plugins: `swh-plugins` on Arch/Debian/Void; `ladspa-swh-plugins` on Fedora/openSUSE.
+- Polkit/`pkexec` for native first-run USB setup.
+- Source builds additionally need Rust **1.98.1**, a C compiler/linker, `pkg-config`, Make, and GTK4/libadwaita/libusb development headers. OpenWave has no Python runtime dependency.
+- GTK-free maintenance/release-source preparation still requires GLib/GIO and libusb development metadata (`libglib2.0-dev` and `libusb-1.0-0-dev` on Debian/Ubuntu).
+
+### Nix
+
+```bash
+nix run github:rikkichy/openwave
+```
+
+The flake exports `packages.x86_64-linux.openwave` and its default package. On NixOS, add the package to `services.udev.packages` for declarative USB permissions, as well as installing it for your user. Launchers carry runtime tool paths and the LADSPA search path. Building a package does not establish physical acceptance for every enabled device profile.
+
+### Bazzite / Fedora Atomic
+
+Use the [native host checkout or user-prefix installation](docs/install-bazzite.md). Do not use the mutable-distribution installer to modify an Atomic system, or assume a distrobox has host USB, ALSA and PipeWire integration.
+
+### Flatpak (experimental)
+
+The experimental [Flatpak recipe](packaging/flatpak/com.github.openwave.yml) targets **panel and routing** use with GNOME Platform/SDK **50** and Rust **1.98.1**. The [build entrypoint](packaging/flatpak/build.sh) requires a prepared vendored release archive, its SHA-256, a native x86-64 runner and an empty output directory; a bare checkout is not the offline release input.
+
+This is a packaging route, not a claim of a published artifact or successful build/hardware run on every target. The sandbox does not install host udev rules, services or audio configuration, and does not restart host audio services. Configure those outside the sandbox. Raw-device permission does not replace host USB permissions; see [sandbox boundaries](docs/install-bazzite.md).
 
 ## Usage
 
-```bash
-openwave            # if installed via install.sh / PKGBUILD
-python3 -m wavexlr  # from a checkout, no install needed
-```
-
-On first launch, OpenWave will prompt to set up USB permissions (via polkit) and install the audio service.
-
-### Init systems
-
-OpenWave detects your init system at runtime:
-
-- **systemd** — the GUI installs a user unit at `~/.config/systemd/user/openwave.service` and enables it. No root needed for install or status checks.
-- **runit** (Artix, Void, Devuan-runit) — the GUI cannot install the system service itself (writing to `/etc/sv` requires root). Create a `wavexlr-audio` service directory at `/etc/sv/wavexlr-audio/` whose `run` script execs `python3 -m wavexlr.daemon` as your user (typically via `chpst -u`), then enable it with `ln -s /etc/sv/wavexlr-audio /var/service/`.
-
-  Status detection from the non-root GUI uses `sv check`; on stock Void the supervise FIFO is mode 0700, so OpenWave falls back to scanning `/proc` for the daemon process.
-
-- **other** (macOS, Windows, no init detected) — the capture-fix section is disabled.
-
-### App drawer, starting at login, starting in the tray
-
-All three are handled by the app; none needs a file copied by hand.
-
-The **app drawer entry** is written on launch to
-`~/.local/share/applications/openwave.desktop`, and rewritten if it goes
-stale — the `Exec` line records where OpenWave was found, so an entry written
-from a checkout that has since been installed properly would otherwise keep
-launching a path that no longer exists.
-
-**Start at login** and **Start in the tray** are switches in the sidebar,
-under *Startup*. Starting in the tray needs a tray: GNOME ships no
-StatusNotifier host, so without an AppIndicator extension OpenWave shows its
-window instead of hiding into nothing, and closing the window quits rather
-than making it disappear. They write `~/.config/autostart/openwave.desktop`, adding
-`--hide` for the tray-only case. Turning autostart off deletes that file;
-the drawer entry is a separate file and is left alone.
-
-Both are user-level files needing no privileges, which is why neither is part
-of the first-run setup that asks for a password. An entry a desktop
-environment has disabled in place (GNOME Tweaks does this rather than
-deleting it) reads back as off, so the switch cannot claim a login behaviour
-that will not happen.
-
-`--hide` still works on its own for a one-off:
+Launch an installed copy or inspect informational options:
 
 ```bash
-python3 -m wavexlr --hide
+openwave
+openwave --help
+openwave --version               # no GTK, audio or USB startup
 ```
 
-## Remote control
+For source runs, use `./target/debug/openwave` after the complete build above. Native first-run setup offers USB permissions, per-user audio configuration and capture-keepalive service setup. USB permission changes require a trusted root-owned installed helper; source and user-prefix builds must use administrator-managed USB rules instead. Setup writes audio configuration for the next relevant audio-service start rather than restarting host PipeWire/WirePlumber. Review changes before interrupting an active session yourself, and reconnect the device when prompted.
 
-OpenWave exports a small set of actions on the session bus, so a control
-surface can drive the parts of it that PipeWire alone cannot reach — the
-window owns the mixer state, and the GUI holds the only USB handle the
-firmware will serve.
+### Run in the background
 
-There is no protocol of its own: `GApplication` already exports
-`org.gtk.Actions` on `com.github.openwave`.
-
-```console
-$ gdbus call --session --dest com.github.openwave \
-    --object-path /com/github/openwave --method org.gtk.Actions.List
-(['switch-group', 'set-source-level', 'toggle-source-mute',
-  'set-cell-level', 'toggle-cell-mute', 'source-groups', 'snapshot',
-  'apply-scene', 'save-scene', 'delete-scene', 'scenes'],)
+```bash
+openwave --hide
 ```
 
-| Action | Parameter | Does |
-|---|---|---|
-| `switch-group` | `s` group name | Hands a microphone group to its next member |
-| `set-source-level` | `(sd)` id, 0–1 | Sets a source's trim |
-| `toggle-source-mute` | `s` id | Flips a source's mute, group rules included |
-| `set-cell-level` | `(ssd)` source, mix, 0–1 | Sets one send — how much of a source a single mix receives |
-| `toggle-cell-mute` | `(ss)` source, mix | Flips one cell's mute |
-| `apply-scene` | `s` scene id | Recalls a scene; entries naming things that are gone are skipped |
-| `save-scene` | `s` name | Captures the current levels under that name |
-| `delete-scene` | `s` scene id | Removes a scene |
-| `source-groups` | — | State: group names worth switching between |
-| `scenes` | — | State: `{scene id: name}` as JSON |
-| `snapshot` | — | State: every source, mix and cell, as JSON |
+From a built checkout, use `./target/debug/openwave --hide`. A hidden launch requires a working tray host; without one, the window remains available.
 
-The two read-only actions publish their answer as action *state* rather than
-returning it: `Activate` has no reply, but `Describe` reads state and `Changed`
-fires when it moves, so a reader can both poll and subscribe. Activate first to
-refresh, then describe.
+Open **Application menu → Settings → Tray icon color** to choose **White** (the default) or **Black** for your panel. The choice is saved across launches. When a connected microphone is muted, the tray icon turns **red**; after unmuting, it returns to your selected color. A disconnected device keeps the selected color, with its disconnected status shown in the tooltip.
 
-`snapshot` is one action rather than one per field because a remote control
-draws all of it on a single button, and reading it piecemeal would let the
-parts disagree mid-read. It reports **every** cell, including the ones at zero:
-a caller cannot otherwise tell a send that is down from one that does not
-exist.
+### Upgrade existing launchers
 
-Everything goes through the window rather than the config files. `Mixer` holds
-the same dict the window holds and rewrites `sources.json` whole on every save,
-so a caller writing that file directly is overwritten the next time a fader
-moves — and a cell written straight to `mixes.json` is undone even faster,
-because `send × trim` is re-applied on every reconcile.
+New menu/autostart entries use a stable profile launcher when it is proven to start this installation. Entries from an earlier native build may instead contain that build's canonical executable path. Keep the previous installation available and inspect a confirmed handoff before deleting it or garbage-collecting its Nix generation:
 
-[**openwave-streamdeck**](https://github.com/NyleGarcia/openwave-streamdeck) is
-a Stream Deck plugin built on this.
+```sh
+openwave --migrate-launchers-from /absolute/previous/bin/openwave --dry-run
+openwave --migrate-launchers-from /absolute/previous/bin/openwave --yes
+```
 
-## Mix levels and reboots
+Use the exact old executable named by the entry; an older Nix entry may name `bin/.openwave-wrapped`. Select the new build in the recognized current profile (`~/.nix-profile` or the per-user/system Nix profile); invoking a versioned store binary directly does not create a stable launcher. Without `--yes`, mutation requires an interactive confirmation. Inspection starts no GUI, USB or audio workers. The handoff preserves login/hidden intent and rechecks the old installation and entry identities; foreign, package-managed, linked, changed or unproven entries remain protected. Missing previous authority is not inferred from launcher text. See [launcher and removal conflicts](docs/troubleshooting.md#installation-and-removal-conflicts).
 
-A mix master is a plain PipeWire sink volume, and the mix sinks are
-`context.objects` in PipeWire's configuration — recreated by the daemon on
-every start, at unity, with no memory. WirePlumber does not restore them
-either, because they are neither streams nor devices it manages. Left alone,
-every mix master silently resets to 100% at each boot, including anything set
-from a control surface.
+### Start at login
 
-OpenWave remembers them in `mixes.json` under `volumes` and applies them once
-the sinks exist. It records what the master is actually set to rather than
-only what its own window did, because anything may move it — a Stream Deck,
-`pavucontrol`, a media key — and whoever moved it, that is the value that
-should come back.
+Login preferences are available in the app. Alternatively, for the default `/usr/local` installation:
 
-Observation is gated on the restore having happened, and that gate is the
-point rather than an optimisation. At boot the sinks exist at unity before
-OpenWave does; an observation landing first would persist that unity and
-destroy the value it exists to protect — silently, exactly once per boot,
-which is indistinguishable from never having saved anything.
+```bash
+mkdir -p ~/.config/autostart
+cp /usr/local/share/openwave/openwave-autostart.desktop ~/.config/autostart/
+```
 
-## Stalled capture
+For a `PREFIX=/usr` installation, use `/usr/share/openwave/openwave-autostart.desktop` instead. The installer also adds an app launcher under `$PREFIX/share/applications`.
 
-A Wave replugged while the system is running enumerates, gets its ALSA card
-and its PipeWire node, reports itself unmuted at full gain with phantom power
-on — and produces nothing. Not quiet audio: no frames.
+### Audio service and init systems
 
-The distinction that makes it detectable is **silence versus no data**. A live
-analogue input always delivers a noise floor; a stalled one delivers nothing,
-so a meter reading it blocks forever on its first read. That is the signal
-OpenWave watches, and it is why a level threshold would be the wrong test — a
-muted microphone in a quiet room is legitimately near zero and must not be
-"recovered".
-
-The remedy is to make ALSA close and reopen the device, which cycling the
-card's profile through `off` and back does. Restarting the capture keepalive
-does not: it exists to *prevent* the race and cannot clear one that has
-already happened.
-
-Three things it deliberately will not do. It will not act on a device that is
-simply absent — unplugged is not broken, and cycling a card for a device
-someone has just removed fights the person who removed it. It will not act on
-silence reported by a dead meter subprocess, whose silence says something
-about `pw-cat` and nothing about the hardware. And it gives up after two
-attempts, because cycling a card is disruptive and a device that is genuinely
-broken should be left alone to be noticed rather than reopened every minute
-forever. Unplugging resets that budget, since replugging is how the stall
-arises in the first place.
-
-## Configuration files
-
-| File | Holds |
+|Init system|Setup and behavior|
 |---|---|
-| `~/.config/openwave/mixdefs.json` | mix identity: name, icon, sink, description |
-| `~/.config/openwave/sources.json` | source identity, bindings, trim |
-| `~/.config/openwave/mixes.json` | per-cell levels, per-mix outputs, mix master volumes |
-| `~/.config/openwave/ui-state.json` | window geometry, gain lock |
-| `~/.config/pipewire/pipewire.conf.d/52-openwave-mixes.conf` | generated: one null sink per mix |
-| `~/.config/wireplumber/wireplumber.conf.d/51-openwave-wave-xlr.conf` | generated: keeps the Wave from being suspended |
+|**systemd**|Installs/enables the user unit `openwave.service`; installation and status checks do not require root.|
+|**runit**|Requires administrator-managed service installation; the app does not provide an automatic privileged installer.|
+|**Other / not detected**|Automatic audio-service management is unsupported.|
 
-These are OpenWave's own state, not an interface: values poked into them from
-outside are overwritten on the next save or reconcile. Use
-[Remote control](#remote-control) instead.
-
-## Reporting problems
-
-Open an issue on the [issue tracker](../../issues) and attach a diagnostics
-bundle: **Export diagnostics** in the sidebar, or
+Health is **observation-only by default**, in both the GUI and daemon:
 
 ```bash
-python3 -m wavexlr.diag
+openwave-daemon --help
+openwave-daemon --version
+# openwave-daemon --auto-recover  # explicitly permits bounded disruptive remedies
 ```
 
-The bundle carries versions, device state, service and PipeWire status —
-and no config contents or app names unless you pass `--full`. Prefer the
-in-app button when OpenWave is running: the firmware serves vendor
-transfers to one process at a time, so the CLI cannot read a device the
-app holds open. For deeper protocol digging there is
-`python3 -m wavexlr.probe dump` (quit OpenWave first, tray icon included). If you have a Wave device that is not in
-the [supported table](#supported-devices) — the `0fd9:00b6` MK.2 revision
-especially — a `probe dump`, plus `probe watch` output while you move each
-physical control, is exactly what adding support needs.
+Do not start a second daemon beside the installed service. `--auto-recover` permits bounded card-profile cycles and sink suspend/resume on confirmed faults; it does not promise to repair every silent device. Capture xruns and no-data faults share a recovery budget; muted, unknown, absent or recreated observations cannot refill it. See [troubleshooting](docs/troubleshooting.md).
 
-## Repository layout
+### Uninstall
 
-```
-wavexlr/
-  device.py   — USB backend (raw libusb via ctypes, wIndex=0x3303 trick)
-  profiles.py — per-model protocol constants and capabilities
-  probe.py    — vendor protocol verification CLI (dump / watch / poke)
-  app.py      — GTK4/Adwaita UI with 10Hz polling
-  tray.py     — StatusNotifierItem tray icon via D-Bus
-  audio.py    — PipeWire capture keepalive (fixes firmware race condition)
-  daemon.py   — Systemd service entry point
-  setup.py    — First-run udev + systemd setup, generated PipeWire config
-  mixer.py    — The router: intake sinks, per-cell loopbacks, stream claiming
-  mixes.py    — Mix definitions store (~/.config/openwave/mixdefs.json)
-  sources.py  — Source definitions store (~/.config/openwave/sources.json)
-  mixmatrix.py  — The sources x mixes grid widget (drag to reorder or group)
-  mixdialog.py  — Create/rename a mix
-  sourcedialog.py — Add or edit a source
-  meter.py    — Level metering via pw-cat
-  recovery.py — Stalled-capture detection and card-profile cycling
-  scheduler.py — Slider-write throttling seam
-  icons.py    — Draw-time icon substitution for themes missing names
-  desktop.py  — App drawer and autostart entries
-  wmnames.py  — Friendly app names via X11/XWayland (optional)
-  service.py  — systemd/runit unit management
-  paths.py    — Install-prefix resolution
-docs/         — architecture, hardware support, protocol, troubleshooting
-tests/        — unit suite (no GTK, no PipeWire, no hardware needed)
-```
+Choose **Application menu → Uninstall OpenWave…**. The same action is available in first-run setup, including failed setup and the replug/Continue screen.
 
-## Development
+For a manual or one-line installation, the dialog removes OpenWave's application files, capture service, owned audio/USB rules and start-at-login entries. **Settings and saved scenes are kept by default**; deleting them requires selecting the separate checkbox. Shared dependencies such as PipeWire and GTK are never removed.
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for the full picture. The short
-version — run from a checkout without installing:
+The headless CLI works without opening the GUI, audio devices or USB controls:
 
 ```bash
-python3 -m wavexlr
+openwave --uninstall --dry-run          # inspect ownership and planned actions
+openwave --uninstall                    # confirm interactively
+openwave --uninstall --yes              # explicitly confirm without a prompt
+openwave --uninstall --delete-settings  # also remove settings and saved scenes
 ```
 
-The tests cover the backend — matching, the stores, state migration, the
-generated config, the device scaling, the mixer's reconcile decisions
-(against a fake PipeWire), stall recovery, the tray, the desktop entries and
-the throttler. They import neither GTK nor a running PipeWire, so they need
-no display, no audio server and no hardware:
+Run this as your login user, **not with sudo**. Administrator permission is requested only for owned system files that require it. The uninstaller coordinates with the running copy of the same installation and waits for workers to stop; it never broadly kills other audio applications.
+
+**Package-managed installations** retain their package files. OpenWave can clean up its own native integration, then displays the package-manager or Nix configuration instructions. Flatpak directs removal to the host and cannot remove native host integration. Externally managed symlinks and package-owned configuration are retained.
+
+Manual installs carry a bounded, hashed `install-manifest.json` receipt, so uninstalling does not require the original checkout. Identifiable legacy layouts are supported; ambiguous ownership or modified recorded files block deletion instead of guessing. Unrecorded siblings and symlink boundaries are preserved. Partial failure or cancellation reports completed steps; those steps are not rolled back. A private recovery bundle prints a confirmed retry command that works even after application files have been removed. Keep that bundle until recovery finishes; its record does not grant authority to delete changed or unrelated files.
+
+`make uninstall` explicitly confirms **application-files-only** removal. It does not remove user integration or settings, stop live workers, or elevate for system files. For a writable manual installation, stop its GUI and capture service first, then use the same `PREFIX` and any staging `DESTDIR` used at installation. It needs a built or installed maintenance helper (`BINARY_DIR` selects the build directory). Use the GUI/CLI uninstaller for live system installations; package-owned files remain the manager's responsibility.
+
+## How it works
+
+Wave devices use USB Class control transfers on **endpoint 0** for configuration. On Linux, `snd-usb-audio` normally blocks transfers using `wIndex=0x3300`, because interface 0 belongs to the audio driver.
+
+OpenWave uses **`wIndex=0x3303`**. The firmware checks the `0x33` prefix, while the kernel sees unclaimed interface 3. This permits controls without detaching the audio driver.
+
+<details>
+<summary><strong>USB protocol and configuration layout</strong></summary>
+
+Supported models use `bRequest=0x85` to read and `bRequest=0x05` to write configuration. Wave XLR and the `0fd9:00a6` XLR Dock share a **34-byte** block; Wave:3 uses a **16-byte** block.
+
+|Field|Wave XLR / XLR Dock|Wave:3|
+|---|---|---|
+|Gain (`uint16`, Q8.8 dB)|`0`|`0`|
+|Mute|`4`|`4`|
+|48 V phantom power|`6`|—|
+|Headphone volume (`int16`, Q8.8)|`9`|`7`|
+|Monitor mix (`uint16`, Q8.8 percent)|—|`10`|
+|Knob / dial mode|`14`|`12`|
+|Low impedance mode|`33`|—|
+
+For Wave:3, dial mode values are `1` = gain, `2` = headphones, and `3` = mix. Per-model constants and capabilities live in [`openwave-core/src/profiles.rs`](crates/openwave-core/src/profiles.rs). See [protocol documentation](docs/protocol.md) for scope and safe probing.
+</details>
+
+### Device probing and diagnostics
+
+The engineer-only probe provides `dump`, `watch` and `poke`. **Quit OpenWave, including its tray, before vendor probing:** the device services vendor transfers from only one process at a time.
 
 ```bash
-python3 -m unittest discover -s tests -t .
+openwave-probe --help                # installed binary
+./target/debug/openwave-probe --help  # after the complete source build
 ```
 
-The GUI, the USB protocol and the routing itself are not unit-tested; those are
-verified against real hardware. `python3 -m wavexlr.probe dump` reads a
-connected device and is the fastest way to check a profile — quit OpenWave
-first, since the firmware serves one process at a time.
+For ordinary problem reports, start with privacy-reduced diagnostics:
+
+```bash
+openwave-diag -o openwave-diagnostics.txt
+```
+
+From a built checkout, use `./target/debug/openwave-diag -o openwave-diagnostics.txt`. Reports include the native compiler/build target; no interpreter or module-path setup is needed.
+
+Diagnostics do not open USB vendor handles unless `--device` is supplied. `--full` adds private details, **not** USB permission. Close OpenWave before `--device`; review reports before posting to [the issue tracker](https://github.com/rikkichy/openwave/issues). See [diagnostic privacy](docs/troubleshooting.md).
+
+## Architecture
+
+|Crate / files|Responsibility|
+|---|---|
+|[`openwave-core`](crates/openwave-core/src): `profiles.rs`, `protocol.rs`|Enabled capabilities and validated USB configuration blocks|
+|[`openwave-core`](crates/openwave-core/src): `model.rs`, `routing.rs`, `scenes.rs`, `effects.rs`, `calibration.rs`, `health.rs`|Compatible state schemas, routing/scene rules, DSP and health policy|
+|[`openwave-runtime`](crates/openwave-runtime/src): `device.rs`, `controller.rs`, `controller/`|libusb ownership, serialized per-device work and state reconciliation|
+|[`openwave-runtime`](crates/openwave-runtime/src): `mixer.rs`, `audio.rs`, `meter.rs`, `calibration.rs`|Worker-owned graph, application claims, capture readiness, raw measurements and DSP routing|
+|[`openwave-runtime`](crates/openwave-runtime/src): `health.rs`, `recovery.rs`, `service.rs`, `bin/openwave-daemon.rs`|Observe-only health, opt-in bounded remedies and capture service|
+|[`openwave-runtime`](crates/openwave-runtime/src): `paths.rs`, `store.rs`, `installation.rs`, `uninstall.rs`, `setup.rs`|Assets/state, installation receipts, confirmed removal and native host setup|
+|[`openwave-runtime`](crates/openwave-runtime/src): `diag.rs`, `probe.rs`, `bin/`|Public diagnostic/probe binaries and private maintenance entrypoint|
+|[`openwave-desktop`](crates/openwave-desktop/src): `app.rs`, `actions.rs`, `ui/`, `tray.rs`, `icons.rs`|GTK/libadwaita interface, compatible session-bus actions and supplied StatusNotifierItem artwork|
+
+Detailed contracts: [architecture/state/actions](docs/ARCHITECTURE.md), [hardware scope](docs/hardware-support.md), and [installation boundaries](docs/install-bazzite.md).
 
 ## Credits
 
-USB protocol reverse-engineered from the macOS Wave Link application using Frida. Inspired by [GoXLR-on-Linux/goxlr-utility](https://github.com/GoXLR-on-Linux/goxlr-utility).
-
-The shape of this documentation — the hardware-support matrix, the protocol
-reference, the per-distro install sections, the AI disclosure — is modeled on
-[emaspa/openxlr](https://github.com/emaspa/openxlr), the sibling project for
-Elgato's XLR interfaces, whose README sets the bar for this niche.
-
-Several ideas and two modules are ported from
-[CryoByte33/openwave](https://github.com/CryoByte33/openwave), a sibling fork:
-the friendly-app-name resolution (`wmnames.py` and the generic-name rules),
-the slider `Throttler` and its scheduler seam, ALSA control discovery by
-name suffix, the hotplug reconnect loop, and the duplicate-source picker
-guard. cryobyte33's fork also decoded the `0fd9:00b6` Wave XLR MK.2 revision —
-a UAC2 device with a different control scheme from the `0fd9:00a6` XLR Dock
-this tree supports — which this tree defers only for lack of that hardware.
-
-## AI disclosure
-
-Parts of this project — code and documentation — were developed with AI
-assistance. Everything that touches hardware is verified by a human against
-real devices: the protocol findings in [docs/protocol.md](docs/protocol.md)
-come from `probe` sessions on live hardware, not from a model's guess, and
-the support claims in [docs/hardware-support.md](docs/hardware-support.md)
-state explicitly what has been verified on hardware and what has not.
+The USB protocol was reverse-engineered from the macOS Wave Link application using Frida. Documentation and adapted contributions incorporate work by Zedwil / NyleGarcia. Inspired by [GoXLR-on-Linux/goxlr-utility](https://github.com/GoXLR-on-Linux/goxlr-utility).
 
 ## License
 
-MIT
+OpenWave is licensed under the [MIT License](https://github.com/rikkichy/openwave/blob/main/LICENSE).
