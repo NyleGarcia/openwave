@@ -2086,7 +2086,8 @@ impl Reconciler {
         for key in stale {
             self.drop_route(&key)?;
         }
-        wanted_sinks.extend(self.restore_streams(graph, &wanted_moves, errors));
+        let kept = wanted_sinks.clone();
+        wanted_sinks.extend(self.restore_streams(graph, &wanted_moves, &kept, errors));
         self.cleanup_sinks(&wanted_sinks, errors, 1)?;
         Ok(silence_blocked)
     }
@@ -2094,14 +2095,29 @@ impl Reconciler {
         &mut self,
         graph: &GraphSnapshot,
         wanted: &HashMap<NodeIdentity, String>,
+        kept: &HashSet<String>,
         errors: &mut Vec<OperationIssue>,
     ) -> HashSet<String> {
         let mut retained = HashSet::new();
-        let moved: Vec<_> = self
+        let mut moved: Vec<_> = self
             .moved
             .iter()
             .map(|(id, sink)| (id.clone(), sink.clone()))
             .collect();
+        // Stream restore can place a stream on an owned sink without an OpenWave move.
+        // It has no recorded original, but must not keep a released sink alive.
+        moved.extend(
+            graph
+                .streams
+                .iter()
+                .filter(|s| {
+                    !self.moved.contains_key(&s.identity)
+                        && s.sink.as_deref().is_some_and(|sink| {
+                            self.sinks.contains_key(sink) && !kept.contains(sink)
+                        })
+                })
+                .map(|s| (s.identity.clone(), None)),
+        );
         for (identity, original) in moved {
             if wanted.contains_key(&identity) {
                 continue;
@@ -2110,11 +2126,10 @@ impl Reconciler {
                 self.moved.remove(&identity);
                 continue;
             };
-            let Some(intake) = stream
-                .sink
-                .as_deref()
-                .filter(|s| s.starts_with("openwave_src_"))
-            else {
+            let Some(intake) = stream.sink.as_deref().filter(|s| {
+                s.starts_with("openwave_src_")
+                    || (self.sinks.contains_key(*s) && !kept.contains(*s))
+            }) else {
                 self.moved.remove(&identity);
                 continue;
             };
@@ -2154,7 +2169,12 @@ impl Reconciler {
                     }
                 });
             let result = target
-                .ok_or_else(|| unavailable("No eligible destination for released stream"))
+                .ok_or_else(|| {
+                    unavailable(format!(
+                        "No eligible non-OpenWave output for {}; move it to another output, then retry",
+                        stream.app_name
+                    ))
+                })
                 .and_then(|target| self.backend.move_stream(stream, &target));
             match result {
                 Ok(()) => {
@@ -2162,7 +2182,10 @@ impl Reconciler {
                 }
                 Err(error) => {
                     retained.insert(intake.into());
-                    errors.push(issue(format!("stream:{}", identity.object_serial), error));
+                    errors.push(issue(
+                        format!("stream:{}", identity.object_serial),
+                        format!("{} remains on {intake}: {error}", stream.app_name),
+                    ));
                 }
             }
         }
@@ -2258,14 +2281,19 @@ impl Reconciler {
                     errors.push(issue(&name, "Sink owner/module changed; unload refused"));
                     continue;
                 }
-                if current
+                let held: Vec<_> = current
                     .streams
                     .iter()
-                    .any(|s| s.sink.as_deref() == Some(&name))
-                {
+                    .filter(|s| s.sink.as_deref() == Some(&name))
+                    .map(|s| s.app_name.as_str())
+                    .collect();
+                if !held.is_empty() {
                     errors.push(issue(
                         &name,
-                        "Intake retained until all streams are restored",
+                        format!(
+                            "Intake retained until all streams are restored; move {} to another output, then retry",
+                            held.join(", ")
+                        ),
                     ));
                     continue;
                 }
@@ -2423,7 +2451,12 @@ impl Reconciler {
                 }
             };
             restoration_errors.clear();
-            retained = self.restore_streams(&graph, &HashMap::new(), &mut restoration_errors);
+            retained = self.restore_streams(
+                &graph,
+                &HashMap::new(),
+                &HashSet::new(),
+                &mut restoration_errors,
+            );
             if retained.is_empty() {
                 break;
             }

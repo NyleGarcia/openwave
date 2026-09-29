@@ -761,7 +761,7 @@ impl AppUi {
                     {
                         dialog.failed(&error.to_string());
                     } else {
-                        self.error("Shutdown incomplete", &format!("{error}\n\nMutations remain frozen. Close the window again to retry stopping owned workers."));
+                        self.error("Shutdown incomplete", &format!("{error}\n\nMutations remain frozen. Move any stream named above to a non-OpenWave output, then close the window again to retry stopping owned workers."));
                     }
                 }
             },

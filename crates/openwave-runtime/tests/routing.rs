@@ -83,12 +83,14 @@ struct World {
     fail_snapshots_on_terminate: usize,
     panic_snapshot: bool,
     mute_gate: Option<(String, mpsc::Sender<()>, mpsc::Receiver<()>)>,
+    default_sink: Option<String>,
 }
 impl World {
     fn new() -> Self {
         let mut world = Self {
             cookie: 71,
             next: 10,
+            default_sink: Some("headphones".into()),
             ..Self::default()
         };
         world.sink("headphones", None, None);
@@ -224,7 +226,7 @@ impl World {
             &json!(self.sources.values().collect::<Vec<_>>()),
             &json!(self.inputs.values().collect::<Vec<_>>()),
             &json!([]),
-            Some("headphones".into()),
+            self.default_sink.clone(),
         )
     }
 }
@@ -1904,6 +1906,76 @@ fn missing_original_stream_sink_uses_only_an_eligible_destination() {
     }
     f.desired.sources.clear();
     f.apply();
+    f.until(|w| {
+        w.destination(stream) == Some("headphones") && !w.sinks.contains_key("openwave_src_music")
+    });
+}
+
+#[test]
+fn shutdown_releases_foreign_stream_that_landed_on_an_intake() {
+    let mut f = Fixture::new();
+    f.app("music", "Music");
+    f.apply();
+    f.until(|w| w.sinks.contains_key("openwave_src_music"));
+    // Stream restore can place a new stream on a remembered intake without an OpenWave move.
+    let (claimed, foreign) = {
+        let mut w = f.world.lock().expect("routing fixture lock poisoned");
+        w.sink("speakers", None, None);
+        w.default_sink = Some("openwave_src_music".into());
+        (
+            w.stream("Music", "Music", "openwave_src_music"),
+            w.stream("Browser", "Browser", "openwave_src_music"),
+        )
+    };
+    f.cycles(3);
+    {
+        let w = f.world.lock().expect("routing fixture lock poisoned");
+        assert_eq!(w.destination(claimed), Some("openwave_src_music"));
+        assert_eq!(w.destination(foreign), Some("openwave_src_music"));
+    }
+    f.mixer.stop().unwrap();
+    let w = f.world.lock().expect("routing fixture lock poisoned");
+    assert_eq!(w.destination(claimed), Some("headphones"));
+    assert_eq!(w.destination(foreign), Some("headphones"));
+    assert!(!w.sinks.contains_key("openwave_src_music"));
+}
+
+#[test]
+fn foreign_stream_on_removed_intake_is_released_and_failure_is_reported() {
+    let mut f = Fixture::new();
+    f.app("music", "Music");
+    f.apply();
+    f.until(|w| w.sinks.contains_key("openwave_src_music"));
+    let stream = f
+        .world
+        .lock()
+        .expect("routing fixture lock poisoned")
+        .stream("Music", "Music", "openwave_src_music");
+    f.cycles(3);
+    f.world
+        .lock()
+        .expect("routing fixture lock poisoned")
+        .fail_moves = 100;
+    f.desired.sources.clear();
+    f.apply();
+    let observed = f.observation(|o| o.errors.iter().any(|e| e.target.starts_with("stream:")));
+    assert!(
+        observed
+            .errors
+            .iter()
+            .any(|e| e.message.starts_with("Music remains on openwave_src_music"))
+    );
+    assert!(
+        f.world
+            .lock()
+            .expect("routing fixture lock poisoned")
+            .sinks
+            .contains_key("openwave_src_music")
+    );
+    f.world
+        .lock()
+        .expect("routing fixture lock poisoned")
+        .fail_moves = 0;
     f.until(|w| {
         w.destination(stream) == Some("headphones") && !w.sinks.contains_key("openwave_src_music")
     });
