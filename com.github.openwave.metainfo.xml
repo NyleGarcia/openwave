@@ -33,9 +33,18 @@
     <modalias>usb:v0FD9p007D*</modalias>
     <modalias>usb:v0FD9p00A6*</modalias>
     <modalias>usb:v0FD9p0070*</modalias>
+    <modalias>usb:v0FD9p00C7*</modalias>
   </supports>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="1.2.0" date="2026-09-29">
+      <description>
+        <p>Add dedicated XLR Dock MK.2 support, a Reload interface action,
+        and mixer layout improvements.</p>
+        <p>Fix native installation, legacy migration, effects configuration,
+        autostart interaction, and stream restoration during shutdown.</p>
+      </description>
+    </release>
     <release version="1.1.1" date="2026-09-10">
       <description>
         <p>Fix process-test isolation on CI runners and preserve package ownership
