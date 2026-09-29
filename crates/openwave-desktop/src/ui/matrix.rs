@@ -304,8 +304,10 @@ impl MatrixState {
         let cell = Fader::new(false, &format!("{source} send to {mix}"));
         cell.widget.add_css_class("openwave-mix-cell");
         cell.widget.add_css_class("card");
+        // Padding comes from CSS, inside the card: margins here would sit
+        // outside it, narrowing the card below its header's width and
+        // leaving the percent label flush against the card's edge.
         cell.widget.set_size_request(220, 64);
-        padding(&cell.widget, 12, 10);
         cell.scale.set_widget_name(&format!("send-{source}-{mix}"));
         let (sid, mid, weak) = (source.clone(), mix.clone(), Rc::downgrade(self));
         cell.connect_changed(LevelMute::FollowLevel, move |change| {
@@ -775,8 +777,9 @@ impl MatrixState {
             if let Some(mix) = snapshot.desired.mixes.get(id) {
                 header.title.set_label(&mix.name);
                 header.title.set_tooltip_text(Some(&mix.name));
+                // An empty subtitle still holds its line, so every header's
+                // fader and meter sit at the same height across the row.
                 header.subtitle.set_label(&mix.subtitle);
-                header.subtitle.set_visible(!mix.subtitle.is_empty());
                 let master_label = format!("{} master volume", mix.name);
                 header.fader.scale.set_tooltip_text(Some(&master_label));
                 header
