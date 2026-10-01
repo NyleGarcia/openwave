@@ -6,6 +6,8 @@ use openwave_core::{
 use openwave_runtime::probe::{Args, ProbeCommand, ProbeDevice, execute};
 use std::{io::Cursor, sync::atomic::AtomicBool, time::Duration};
 struct Device {
+    profile: ProfileId,
+    selectors: Vec<u16>,
     config: Vec<u8>,
     writes: Vec<Vec<u8>>,
     reads: usize,
@@ -17,6 +19,8 @@ struct Device {
 impl Device {
     fn new() -> Self {
         Self {
+            profile: ProfileId::Wave3,
+            selectors: Vec::new(),
             config: vec![0; 16],
             writes: Vec::new(),
             reads: 0,
@@ -29,10 +33,21 @@ impl Device {
 }
 impl ProbeDevice for Device {
     fn profile(&self) -> ProfileId {
-        ProfileId::Wave3
+        self.profile
     }
-    fn read_raw(&mut self, _selector: u16, buffer: &mut [u8]) -> Result<usize> {
+    fn read_raw(&mut self, selector: u16, buffer: &mut [u8]) -> Result<usize> {
         self.reads += 1;
+        self.selectors.push(selector);
+        if self.profile == ProfileId::XlrDockMk2 && selector != 4 {
+            let count = match selector {
+                5 => 2,
+                1 => 6,
+                _ => return Err(OperationError::invalid("unknown Dock block")),
+            }
+            .min(buffer.len());
+            buffer[..count].fill(0);
+            return Ok(count);
+        }
         if self.fail_read {
             return Err(OperationError::unavailable("fixture transfer failed"));
         }
@@ -175,7 +190,7 @@ fn cli_rejects_invalid_ranges_conflicts_and_nonfinite_intervals_without_io() {
         vec!["watch", "--interval", "0"],
         vec!["poke"],
         vec!["poke", "--offset", "3"],
-        vec!["poke", "--offset", "34", "--byte", "1"],
+        vec!["poke", "--offset", "38", "--byte", "1"],
         vec!["poke", "--offset", "0", "--byte", "256"],
         vec!["poke", "--noop", "--offset", "1", "--byte", "2"],
     ] {
@@ -200,4 +215,70 @@ fn cli_rejects_invalid_ranges_conflicts_and_nonfinite_intervals_without_io() {
         .output()
         .unwrap();
     assert_eq!(output.status.code(), Some(2));
+}
+
+#[test]
+fn dock_dump_uses_known_blocks_and_poke_preserves_primary_settings() {
+    let mut device = Device::new();
+    device.profile = ProfileId::XlrDockMk2;
+    device.config = (0..38).collect();
+    run(
+        &mut device,
+        ProbeCommand::Dump {
+            wvalue: None,
+            len: 512,
+        },
+        "",
+    )
+    .0
+    .unwrap();
+    assert_eq!(device.selectors, [4, 5, 1]);
+    device.selectors.clear();
+    let mut expected = device.config.clone();
+    expected[37] = 0xa5;
+    run(
+        &mut device,
+        ProbeCommand::Poke {
+            offset: Some(37),
+            byte: Some(0xa5),
+            noop: false,
+            yes: true,
+        },
+        "",
+    )
+    .0
+    .unwrap();
+    assert_eq!(device.writes, [expected]);
+    assert_eq!(device.selectors, [4, 4]);
+    let mut output = Vec::new();
+    execute(
+        &mut device,
+        &ProbeCommand::Watch {
+            interval: Duration::from_millis(1),
+        },
+        &mut Cursor::new(""),
+        &mut output,
+        &AtomicBool::new(true),
+    )
+    .unwrap();
+    assert!(
+        String::from_utf8(output)
+            .unwrap()
+            .contains("config: 38 bytes")
+    );
+    device.short = true;
+    let writes = device.writes.clone();
+    assert!(run(&mut device, noop(true), "").0.is_err());
+    assert_eq!(device.writes, writes);
+    assert!(
+        run(
+            &mut device,
+            ProbeCommand::Watch {
+                interval: Duration::from_millis(1),
+            },
+            ""
+        )
+        .0
+        .is_err()
+    );
 }

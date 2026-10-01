@@ -30,6 +30,7 @@ pub struct Sidebar {
     gain_lock: gtk::ToggleButton,
     phantom: adw::SwitchRow,
     knob: gtk::Label,
+    knob_row: adw::ActionRow,
     headphone: DeviceSlider,
     low_z: adw::SwitchRow,
     monitor: DeviceSlider,
@@ -150,7 +151,13 @@ impl Sidebar {
             10,
             "Headphone volume",
             &gtk::Adjustment::new(-60.0, -60.0, 0.0, 0.5, 2.0, 0.0),
-            |_, value| format!("{value:.1} dB"),
+            |unit, value| {
+                if unit.profile.profile().legacy.is_none() {
+                    format!("{value:.2} dB")
+                } else {
+                    format!("{value:.1} dB")
+                }
+            },
         );
         headphone.add_to(&headphones);
         let low_z = adw::SwitchRow::builder()
@@ -163,7 +170,12 @@ impl Sidebar {
             8,
             "Microphone / PC monitor mix",
             &gtk::Adjustment::new(0.0, 0.0, 0x6400 as f64, 0x100 as f64, 0x800 as f64, 0.0),
-            |_, value| format!("{:.0}%", value / 256.0),
+            |unit, value| {
+                format!(
+                    "{:.0}%",
+                    value * 100.0 / f64::from(unit.profile.profile().mix_max)
+                )
+            },
         );
         monitor
             .value_row
@@ -267,7 +279,7 @@ impl Sidebar {
                         (DeviceSetting::GainRaw(raw), f64::from(raw))
                     }
                     Slider::Headphone => {
-                        let db = value.clamp(-60.0, 0.0);
+                        let db = value.clamp(profile.hp_min_db(), 0.0);
                         (DeviceSetting::HeadphoneDb(db), db)
                     }
                     Slider::Monitor => {
@@ -371,6 +383,7 @@ impl Sidebar {
             gain_lock,
             phantom,
             knob,
+            knob_row,
             headphone,
             low_z,
             monitor,
@@ -518,15 +531,18 @@ impl Sidebar {
         self.mute.set_sensitive(muted.is_some());
         self.mute.set_active(muted.unwrap_or(false));
         if let Some(profile) = profile {
-            self.gain
-                .widget()
-                .adjustment()
-                .set_upper(f64::from(profile.gain_max));
+            let gain = self.gain.widget().adjustment();
+            gain.set_upper(f64::from(profile.gain_max));
+            gain.set_step_increment((f64::from(profile.gain_scale) / 4.0).max(1.0));
+            gain.set_page_increment(f64::from(profile.gain_scale) * 2.0);
+            let headphone = self.headphone.widget().adjustment();
+            headphone.set_lower(profile.hp_min_db());
+            headphone.set_step_increment(if profile.legacy.is_none() { 0.25 } else { 0.5 });
             if profile.has_monitor_mix() {
-                self.monitor
-                    .widget()
-                    .adjustment()
-                    .set_upper(f64::from(profile.mix_max));
+                let monitor = self.monitor.widget().adjustment();
+                monitor.set_upper(f64::from(profile.mix_max));
+                monitor.set_step_increment((f64::from(profile.mix_max) / 100.0).max(1.0));
+                monitor.set_page_increment(f64::from(profile.mix_max) * 0.08);
             }
         }
         self.gain.render(
@@ -545,12 +561,14 @@ impl Sidebar {
             unit.and_then(|unit| monitor.map(|raw| (unit.id, f64::from(raw)))),
             true,
         );
+        self.knob_row
+            .set_visible(profile.is_some_and(|profile| profile.legacy.is_some()));
         self.knob
             .set_label(match state.map(|state| state.knob_mode) {
                 Some(KnobMode::Gain) => "Gain",
                 Some(KnobMode::Headphones) => "Headphones",
                 Some(KnobMode::MonitorMix) => "Monitor Mix",
-                None => "—",
+                Some(KnobMode::None) | None => "—",
             });
         self.firmware
             .set_label(unit.map_or("—", |unit| nonempty(&unit.info.firmware)));
@@ -646,5 +664,54 @@ mod tests {
         assert_eq!(state(b.id).hp_volume_db, -18.0);
         assert!(state(b.id).muted);
         assert_eq!(rig.submitted_targets(), vec![b.id, b.id]);
+    }
+
+    #[test]
+    #[ignore = "requires the isolated installed GTK test runner"]
+    fn dock_controls_use_native_ranges_and_hide_the_absent_knob() {
+        use openwave_core::{model::Observation, profiles::ProfileId, protocol::ConfigBuffer};
+        adw::init().expect("private GTK display");
+        let mut dock = unit("DOCK", 1, 0.0);
+        dock.id.profile = ProfileId::XlrDockMk2;
+        dock.state = Observation::Known(
+            ConfigBuffer::decode_dock(&[0; 38], &[240, 0], &[100, 0, 0, 0, 0, 0])
+                .unwrap()
+                .state(),
+        );
+        let sidebar = Sidebar::new(icons(), Rc::new(|_| {}));
+        sidebar.render(Arc::new(AppSnapshot {
+            lifecycle: Lifecycle::Running,
+            selected_unit: Some(dock.id),
+            units: vec![dock].into(),
+            ..Default::default()
+        }));
+        assert_eq!(sidebar.gain.widget().adjustment().upper(), 80.0);
+        assert_eq!(sidebar.gain.widget().adjustment().step_increment(), 1.0);
+        assert_eq!(sidebar.headphone.widget().adjustment().lower(), -60.0);
+        assert_eq!(sidebar.headphone.widget().value(), -60.0);
+        sidebar.headphone.widget().set_value(-12.25);
+        assert!(
+            descendants::<gtk::Label>(&sidebar.headphone.value_row)
+                .iter()
+                .any(|label| label.text() == "-12.25 dB")
+        );
+        assert_eq!(sidebar.monitor.widget().adjustment().upper(), 200.0);
+        assert!(
+            descendants::<gtk::Label>(&sidebar.monitor.value_row)
+                .iter()
+                .any(|label| label.text() == "50%")
+        );
+        assert!(!sidebar.knob_row.is_visible());
+        let legacy = unit("LEGACY", 2, -90.0);
+        sidebar.render(Arc::new(AppSnapshot {
+            lifecycle: Lifecycle::Running,
+            selected_unit: Some(legacy.id),
+            units: vec![legacy].into(),
+            ..Default::default()
+        }));
+        assert_eq!(sidebar.gain.widget().adjustment().step_increment(), 64.0);
+        assert_eq!(sidebar.headphone.widget().adjustment().lower(), -128.0);
+        assert_eq!(sidebar.headphone.widget().value(), -90.0);
+        assert!(sidebar.knob_row.is_visible());
     }
 }

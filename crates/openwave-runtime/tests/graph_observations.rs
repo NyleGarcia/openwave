@@ -545,9 +545,12 @@ fn vendor_retirement_preserves_software_mute_until_a_deliberate_capture_edge() {
     captures[1].muted = Observation::Unknown(unavailable());
     controller.fresh(captures.clone());
     let profile = ProfileId::WaveXlr;
-    let mut state = ConfigBuffer::decode(profile, &vec![0; profile.profile().config_len])
-        .unwrap()
-        .state();
+    let mut state = ConfigBuffer::decode(
+        profile,
+        &vec![0; profile.profile().legacy.unwrap().config_len],
+    )
+    .unwrap()
+    .state();
     state.muted = true;
     let unit = UnitSnapshot {
         id: UnitId {
@@ -708,9 +711,12 @@ fn unknown_graph_cannot_infer_vendor_binding_or_offer_cached_capture_rows() {
     };
     let mut controller = ControllerRig::new();
     let profile = ProfileId::WaveXlr;
-    let mut state = ConfigBuffer::decode(profile, &vec![0; profile.profile().config_len])
-        .unwrap()
-        .state();
+    let mut state = ConfigBuffer::decode(
+        profile,
+        &vec![0; profile.profile().legacy.unwrap().config_len],
+    )
+    .unwrap()
+    .state();
     state.muted = true;
     let mut unit = UnitSnapshot {
         id: UnitId {

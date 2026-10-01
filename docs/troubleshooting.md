@@ -24,7 +24,7 @@ Privacy filtering is not a guarantee of anonymity: review reports, especially fu
 
 ## Device missing or USB reads failing
 
-1. Check the exact PID against [hardware support](hardware-support.md). `00c7` and unlisted PIDs are not enabled.
+1. Check the exact PID against [hardware support](hardware-support.md). `00c7` requires a build with the Dock MK.2 backend and an updated administrator-managed USB rule; `00b6` and unlisted PIDs are not enabled. If Dock bank detection rejects both `0x0103` and `0x0203`, report the error rather than forcing a legacy profile.
 2. Check native USB permission setup. A checkout or user-prefix helper cannot be elevated; arrange administrator-managed rules rather than running it with sudo/pkexec. Flatpak device access does not install host udev rules; use [host setup](install-bazzite.md).
 3. Close other vendor-control clients. A probe or `diag --device` must not compete with the tray-resident GUI.
 4. With several units, check the selected serial and each source's capture-node binding. Do not fix ambiguous identity by selecting an arbitrary ALSA card or applying a model-only scene to whichever unit responds first.

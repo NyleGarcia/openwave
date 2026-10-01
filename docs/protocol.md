@@ -4,7 +4,7 @@ This is an engineering reference for the profiles enabled in OpenWave, derived f
 
 ## Transport and ownership
 
-The vendor configuration protocol uses USB Class control transfers on endpoint 0:
+The legacy `007d`, `00a6` and `0070` configuration protocols use USB Class control transfers on endpoint 0:
 
 | Field | Read | Write |
 |---|---|---|
@@ -13,7 +13,7 @@ The vendor configuration protocol uses USB Class control transfers on endpoint 0
 | `wValue` | Block selector | Block selector |
 | `wIndex` | `0x3303` | `0x3303` |
 
-Wave Link's `0x3300` addresses interface 0, owned by Linux's `snd-usb-audio`. The enabled profiles use `0x3303`, retaining the protocol's `0x33` prefix while targeting interface 3. OpenWave does not detach the audio driver for these transfers. This technique is profile-specific, not a guarantee that arbitrary transfers cannot disrupt hardware.
+Wave Link's `0x3300` addresses interface 0, owned by Linux's `snd-usb-audio`. The legacy profiles use `0x3303`, retaining the protocol's `0x33` prefix while targeting interface 3. OpenWave does not detach the audio driver for these transfers. The `00c7` Dock uses the separate vendor protocol below; neither dialect is a guarantee that arbitrary transfers cannot disrupt hardware.
 
 Only one process should own vendor transfers to a unit. A competing GUI, diagnostic collector or probe can produce `-EIO`/read failures. Quit OpenWave **including its tray process** before probing or using diagnostics with `--device`. Native vendor-control clients acquire `Lease::vendor_control`; the lease does not make an unrelated third-party client safe to run concurrently. Within the runtime, `DeviceManager` gives each captured `UnitId` a serialized queue for polling and writes. Selection changes cannot retarget queued work, and retirement drains the queue before disconnect. This ownership must not be bypassed by another USB client.
 
@@ -42,7 +42,7 @@ The meter begins with two unsigned 32-bit raw levels; their PCM normalization is
 | 14 | byte | Knob mode: `2` selects headphone volume |
 | 33 | byte | Low impedance mode: `1` on, `0` off |
 
-The `00a6` profile uses this layout. That does not extend it to `00c7`, `00b6` or every device sold as a Dock/MK.2.
+The `00a6` profile uses this layout. It does not apply to the `00c7` Dock described below, `00b6` or every device sold as a Dock/MK.2.
 
 ### Wave:3: `0fd9:0070`
 
@@ -56,6 +56,26 @@ The `00a6` profile uses this layout. That does not extend it to `00c7`, `00b6` o
 
 No phantom or low-impedance offset is defined for Wave:3. All unlisted bytes remain unknown/reserved.
 
+### XLR Dock MK.2: `0fd9:00c7`
+
+Protocol evidence comes from OpenXLR's [hardware report](https://github.com/emaspa/openxlr/issues/1#issuecomment-5549540393), [documented bank variants](https://github.com/emaspa/openxlr/blob/03bdae51b47fd01b599230957537474ec66b7cc9/docs/hardware-support.md) and [MK.2 protocol implementation](https://github.com/emaspa/openxlr/blob/03bdae51b47fd01b599230957537474ec66b7cc9/src/OpenXLR.Core/Devices/WaveXlrMk2Device.cs). OpenWave independently implements those wire facts; no upstream implementation code is included.
+
+Reads use `bmRequestType=0xC1`, writes use `0x41`, and both use `bRequest=0x01`. The `wValue` selects a block; `wIndex` is the bank. Only vendor interface 3 is claimed, without driver detach, alternate-setting changes or device reset.
+
+| Block | Selector | Exact length | Implemented fields |
+|---|---|---|---|
+| Input settings | `0x0004` | 38 bytes | Byte 0: integer gain, 0–80 dB. Byte 1: mute bit 0, phantom bit 1 |
+| Headphones | `0x0005` | 2 bytes | Byte 0: attenuation in quarter-dB steps, 0–240 (0 to −60 dB). Byte 1: low-impedance bit 1 |
+| Hardware monitor mix | `0x0001` | 6 bytes | Byte 0: 0–200, microphone-only to PC-only |
+
+Connection reads all three blocks at `0x0103`, trying `0x0203` only after a stall or incomplete block. Each bank must answer every exact length; otherwise the handle closes and no writes are enabled. Other errors propagate rather than authorizing another bank. A USB I/O read error gets one retry on the same bank, based on upstream observations during streaming. Writes are never automatically retried. The chosen bank is fixed for the connection and detected afresh after reconnect. Complete-length reads are a necessary admission check, not independent proof of an unknown firmware layout.
+
+Production controls read all three blocks, preserve every unmodified byte/bit, and write only blocks changed by the requested settings. No commit command is sent. A batch spanning blocks is serialized but not hardware-atomic: if a later transfer fails, earlier writes may have succeeded and the next poll observes the actual state.
+
+The serial comes from the USB string descriptor. Firmware/API versions and vendor meter layouts are not mapped; USB `bcdDevice` is not presented as a firmware version. UI metering still uses PCM. There is no physical knob. Unexposed onboard DSP flags remain unchanged by ordinary controls, and scenes never request phantom power.
+
+OpenWave's native implementation has passed device-free protocol, transport and GTK checks; it has not been physically exercised on a `00c7` unit here. Upstream records hardware verification at `0x0103`, with `0x0203` compatibility owner-reported.
+
 ## Engineer-only probe
 
 Use the native [`openwave-probe`](../crates/openwave-runtime/src/probe.rs) executable with dependencies and USB permissions already configured. From a source checkout, first build the sibling executables with `cargo build --locked --workspace --bins`, then use `target/debug/openwave-probe` in place of `openwave-probe` below. The probe has no per-unit selection flag: it connects to the first supported unit in bus/address order. **Use only one connected supported unit when investigating a specific device**, and verify the printed model, VID:PID and bus/address before proceeding. Do not use it as a multi-device control interface.
@@ -68,6 +88,8 @@ openwave-probe watch --interval 0.1
 ```
 
 `dump` reports expected versus returned lengths for config/meter/device-info blocks. `watch` prints changed byte offsets while you move one physical control at a time; Ctrl+C stops it. Dumps can contain serials and are not privacy-redacted. Custom `dump --wvalue 0xN --len N` requests are protocol research, not a general device-health check.
+
+For `00c7`, `dump` reads the three blocks above; unknown selectors are rejected and requested reads are capped to the documented lengths. `watch` and explicitly confirmed `poke` operate on the 38-byte input-settings block only. They do not treat the headphone or monitor blocks as legacy meters/device information.
 
 **`poke` writes hardware. Even `poke --noop` sends a full config write.** Its unchanged payload can still trigger firmware side effects; it is not a read-only verification command. The interface is `poke --offset N --byte VALUE`, or `poke --noop` without offset/byte. Both forms prompt for confirmation unless `--yes` is supplied. The config is read after consent, then written and read back for byte-for-byte verification. Do not write unknown offsets, copy byte numbers across profiles, or demonstrate writes by toggling phantom power. Disconnect sensitive equipment and establish the exact target/layout before any controlled write experiment.
 

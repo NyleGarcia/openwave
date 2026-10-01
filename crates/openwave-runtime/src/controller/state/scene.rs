@@ -397,7 +397,14 @@ impl Controller {
                 }
             }
             if let Some(db) = patch.hp_volume_db {
-                settings.push(DeviceSetting::HeadphoneDb(db));
+                if db < profile.hp_min_db() {
+                    skip(
+                        "headphone volume",
+                        "Headphone level is outside profile range",
+                    );
+                } else {
+                    settings.push(DeviceSetting::HeadphoneDb(db));
+                }
             }
             if let Some(low_z) = patch.low_impedance {
                 if profile.has_low_z() {

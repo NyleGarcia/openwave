@@ -223,9 +223,12 @@ fn mid(value: &str) -> MixId {
 }
 fn unit(address: u8, serial: &str, muted: bool) -> UnitSnapshot {
     let profile = ProfileId::WaveXlr;
-    let mut state = ConfigBuffer::decode(profile, &vec![0; profile.profile().config_len])
-        .unwrap()
-        .state();
+    let mut state = ConfigBuffer::decode(
+        profile,
+        &vec![0; profile.profile().legacy.unwrap().config_len],
+    )
+    .unwrap()
+    .state();
     state.muted = muted;
     UnitSnapshot {
         id: UnitId {
@@ -617,6 +620,23 @@ fn stale_master_revision_or_runtime_identity_cannot_overwrite_new_desire() {
         f.handle.snapshot().desired.matrix.volumes["personal"].volume,
         0.3
     );
+}
+
+#[test]
+fn dock_mk2_capture_is_offered_with_its_own_device_identity() {
+    let f = Rig::new(json!({}), json!({}), None);
+    let name = "alsa_input.usb-Elgato_Elgato_Wave_XLR_Dock_MK.2_FIXTURE-00.mono-fallback";
+    f.graph(vec![capture(name, None, None)], IndexMap::new());
+    f.barrier("Dock discovered");
+    let snapshot = f.handle.snapshot();
+    let source = snapshot
+        .desired
+        .sources
+        .values()
+        .find(|source| source.node_name == name)
+        .expect("Dock capture source");
+    assert_eq!(source.kind, SourceKind::Device);
+    assert!(source.protected);
 }
 
 #[test]

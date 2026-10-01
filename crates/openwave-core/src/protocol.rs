@@ -10,15 +10,18 @@ pub const BREQUEST_WRITE: u8 = 0x05;
 pub const RT_CLASS_IN: u8 = 0xa1;
 pub const RT_CLASS_OUT: u8 = 0x21;
 pub const TRANSFER_TIMEOUT: Duration = Duration::from_millis(1000);
-pub const MAX_CONFIG_LEN: usize = 34;
+pub const MAX_CONFIG_LEN: usize = 38;
 pub const MAX_METER_LEN: usize = 10;
 pub const MAX_INFO_LEN: usize = 64;
+pub const DOCK_BLOCKS: [(&str, u16, usize); 3] =
+    [("settings", 4, 38), ("headphones", 5, 2), ("monitor", 1, 6)];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KnobMode {
     Gain,
     Headphones,
     MonitorMix,
+    None,
 }
 
 impl fmt::Display for KnobMode {
@@ -27,6 +30,7 @@ impl fmt::Display for KnobMode {
             Self::Gain => "Gain",
             Self::Headphones => "Headphones",
             Self::MonitorMix => "Monitor mix",
+            Self::None => "None",
         })
     }
 }
@@ -56,14 +60,43 @@ pub struct DeviceState {
 pub struct ConfigBuffer {
     profile: ProfileId,
     bytes: [u8; MAX_CONFIG_LEN],
+    headphones: [u8; 2],
+    monitor: [u8; 6],
 }
 
 impl ConfigBuffer {
     pub fn decode(profile: ProfileId, data: &[u8]) -> Result<Self> {
-        exact_length(data, profile.profile().config_len, "config")?;
+        let legacy = profile.profile().legacy.ok_or_else(|| {
+            OperationError::new(
+                ErrorCode::Unsupported,
+                "Dock config requires all three blocks",
+            )
+        })?;
+        exact_length(data, legacy.config_len, "config")?;
         let mut bytes = [0; MAX_CONFIG_LEN];
         bytes[..data.len()].copy_from_slice(data);
-        Ok(Self { profile, bytes })
+        Ok(Self {
+            profile,
+            bytes,
+            headphones: [0; 2],
+            monitor: [0; 6],
+        })
+    }
+
+    pub fn decode_dock(settings: &[u8], headphones: &[u8], monitor: &[u8]) -> Result<Self> {
+        exact_length(settings, 38, "settings")?;
+        exact_length(headphones, 2, "headphones")?;
+        exact_length(monitor, 6, "monitor")?;
+        let mut config = Self {
+            profile: ProfileId::XlrDockMk2,
+            bytes: [0; MAX_CONFIG_LEN],
+            headphones: [0; 2],
+            monitor: [0; 6],
+        };
+        config.bytes.copy_from_slice(settings);
+        config.headphones.copy_from_slice(headphones);
+        config.monitor.copy_from_slice(monitor);
+        Ok(config)
     }
 
     pub fn profile(&self) -> ProfileId {
@@ -71,11 +104,38 @@ impl ConfigBuffer {
     }
 
     pub fn as_bytes(&self) -> &[u8] {
-        &self.bytes[..self.profile.profile().config_len]
+        let length = self
+            .profile
+            .profile()
+            .legacy
+            .map_or(38, |legacy| legacy.config_len);
+        &self.bytes[..length]
+    }
+
+    pub fn blocks(&self) -> impl Iterator<Item = (u16, &[u8])> {
+        let legacy = self.profile.profile().legacy;
+        [
+            Some((legacy.map_or(4, |p| p.wvalue_config), self.as_bytes())),
+            legacy.is_none().then_some((5, self.headphones.as_slice())),
+            legacy.is_none().then_some((1, self.monitor.as_slice())),
+        ]
+        .into_iter()
+        .flatten()
     }
 
     pub fn state(&self) -> DeviceState {
-        let p = self.profile.profile();
+        let profile = self.profile.profile();
+        let Some(p) = profile.legacy else {
+            return DeviceState {
+                gain_raw: u16::from(self.bytes[0]),
+                muted: self.bytes[1] & 1 != 0,
+                hp_volume_db: -f64::from(self.headphones[0]) / 4.0,
+                phantom: Some(self.bytes[1] & 2 != 0),
+                low_impedance: Some(self.headphones[1] & 2 != 0),
+                monitor_mix: Some(u16::from(self.monitor[0])),
+                knob_mode: KnobMode::None,
+            };
+        };
         let knob_mode = match self.bytes[p.off_vol_select] {
             2 => KnobMode::Headphones,
             3 if self.profile == ProfileId::Wave3 => KnobMode::MonitorMix,
@@ -84,7 +144,8 @@ impl ConfigBuffer {
         DeviceState {
             gain_raw: read_u16(&self.bytes, p.off_gain),
             muted: self.bytes[p.off_mute] != 0,
-            hp_volume_db: f64::from(read_i16(&self.bytes, p.off_hp_vol)) / f64::from(p.hp_scale),
+            hp_volume_db: f64::from(read_i16(&self.bytes, p.off_hp_vol))
+                / f64::from(profile.hp_scale),
             phantom: p.off_phantom.map(|offset| self.bytes[offset] != 0),
             low_impedance: p.off_low_z.map(|offset| self.bytes[offset] != 0),
             monitor_mix: p
@@ -97,13 +158,32 @@ impl ConfigBuffer {
     /// Refuses unsupported/nonfinite settings before changing any bytes.
     pub fn apply(&mut self, setting: DeviceSetting) -> Result<()> {
         let setting = validate_setting(self.profile, setting)?;
-        let p = self.profile.profile();
+        let profile = self.profile.profile();
+        let Some(p) = profile.legacy else {
+            match setting {
+                DeviceSetting::GainRaw(value) => self.bytes[0] = value as u8,
+                DeviceSetting::Mute(value) => {
+                    self.bytes[1] = (self.bytes[1] & !1) | u8::from(value);
+                }
+                DeviceSetting::Phantom(value) => {
+                    self.bytes[1] = (self.bytes[1] & !2) | (u8::from(value) << 1);
+                }
+                DeviceSetting::HeadphoneDb(db) => {
+                    self.headphones[0] = (-db * 4.0).round_ties_even() as u8;
+                }
+                DeviceSetting::LowImpedance(value) => {
+                    self.headphones[1] = (self.headphones[1] & !2) | (u8::from(value) << 1);
+                }
+                DeviceSetting::MonitorMix(value) => self.monitor[0] = value as u8,
+            }
+            return Ok(());
+        };
         match setting {
             DeviceSetting::GainRaw(value) => self.put_u16(p.off_gain, value),
             DeviceSetting::Mute(value) => self.bytes[p.off_mute] = u8::from(value),
             DeviceSetting::HeadphoneDb(db) => {
                 // Truncate toward zero, matching the firmware setter's int().
-                let raw = (db * f64::from(p.hp_scale)) as i16;
+                let raw = (db * f64::from(profile.hp_scale)) as i16;
                 self.bytes[p.off_hp_vol..p.off_hp_vol + 2].copy_from_slice(&raw.to_le_bytes());
             }
             DeviceSetting::Phantom(value) => {
@@ -140,7 +220,7 @@ pub fn validate_setting(profile: ProfileId, setting: DeviceSetting) -> Result<De
             if !db.is_finite() {
                 return Err(OperationError::invalid("Headphone volume must be finite"));
             }
-            DeviceSetting::HeadphoneDb(db.clamp(-128.0, 0.0))
+            DeviceSetting::HeadphoneDb(db.clamp(p.hp_min_db(), 0.0))
         }
         DeviceSetting::Phantom(_) if !p.has_phantom() => return Err(unsupported("phantom power")),
         DeviceSetting::LowImpedance(_) if !p.has_low_z() => {
@@ -155,7 +235,12 @@ pub fn validate_setting(profile: ProfileId, setting: DeviceSetting) -> Result<De
 }
 
 pub fn decode_device_info(profile: ProfileId, data: &[u8]) -> Result<DeviceInfo> {
-    let p = profile.profile();
+    let p = profile.profile().legacy.ok_or_else(|| {
+        OperationError::new(
+            ErrorCode::Unsupported,
+            "Dock has no known device-info block",
+        )
+    })?;
     exact_length(data, p.devinfo_len, "device info")?;
     let serial_bytes = &data[p.devinfo_serial.0..p.devinfo_serial.1];
     let serial_end = serial_bytes
@@ -191,7 +276,10 @@ pub struct MeterLevels {
 }
 
 pub fn decode_meters(profile: ProfileId, data: &[u8]) -> Result<MeterLevels> {
-    exact_length(data, profile.profile().meter_len, "meter")?;
+    let legacy = profile.profile().legacy.ok_or_else(|| {
+        OperationError::new(ErrorCode::Unsupported, "Dock has no known meter block")
+    })?;
+    exact_length(data, legacy.meter_len, "meter")?;
     Ok(MeterLevels {
         left: u32::from_le_bytes([data[0], data[1], data[2], data[3]]),
         right: u32::from_le_bytes([data[4], data[5], data[6], data[7]]),

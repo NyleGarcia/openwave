@@ -766,6 +766,16 @@ impl Controller {
                     || capture
                         .node_name
                         .starts_with("alsa_input.usb-Elgato_Systems_Elgato_XLR_Dock_")
+                    || capture
+                        .node_name
+                        .strip_prefix("alsa_input.usb-")
+                        .is_some_and(|name| {
+                            name.starts_with(
+                                openwave_core::profiles::ProfileId::XlrDockMk2
+                                    .profile()
+                                    .capture_serial_prefix,
+                            )
+                        })
             })
             .cloned()
             .collect();

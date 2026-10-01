@@ -279,14 +279,17 @@ impl Drop for Fixture {
     }
 }
 fn device_state(profile: ProfileId) -> DeviceState {
-    ConfigBuffer::decode(profile, &vec![0; profile.profile().config_len])
-        .unwrap()
-        .state()
+    match profile.profile().legacy {
+        Some(legacy) => ConfigBuffer::decode(profile, &vec![0; legacy.config_len]),
+        None => ConfigBuffer::decode_dock(&[0; 38], &[0; 2], &[0; 6]),
+    }
+    .unwrap()
+    .state()
 }
 fn unit(profile: ProfileId, address: u8, serial: &str, muted: bool) -> UnitSnapshot {
     let mut state = device_state(profile);
     state.muted = muted;
-    state.gain_raw = 1280;
+    state.gain_raw = 5 * profile.profile().gain_scale;
     state.hp_volume_db = -12.0;
     UnitSnapshot {
         id: UnitId {
@@ -413,24 +416,28 @@ fn exact_matching_selected_gain_lock_and_profile_limits_do_not_substitute_or_wri
         json!({"name":"Recall","hardware":{
             "wave_xlr":{"gain_raw":256},"wave_xlr:A":{"gain_raw":512,"low_impedance":true},
             "wave_xlr:B":{"gain_raw":768},"wave_xlr:missing":{"mute":true},
-            "wave3:C":{"gain_raw":65535,"low_impedance":true,"monitor_mix":65535,"hp_volume_db":-15.0}
+            "wave3:C":{"gain_raw":65535,"low_impedance":true,"monitor_mix":65535,"hp_volume_db":-15.0},
+            "xlr_dock_mk2:D":{"gain_raw":81,"low_impedance":true,"monitor_mix":201,"hp_volume_db":-100.0}
         }}),
         None,
     );
     let a = unit(ProfileId::WaveXlr, 1, "A", true);
     let b = unit(ProfileId::WaveXlr, 2, "B", false);
     let c = unit(ProfileId::Wave3, 3, "C", false);
-    f.connect(&[a.clone(), b.clone(), c.clone()], false);
+    let d = unit(ProfileId::XlrDockMk2, 4, "D", false);
+    f.connect(&[a.clone(), b.clone(), c.clone(), d.clone()], false);
     let lock = f.submit(AppCommand::SetGainLock { locked: true });
     assert!(matches!(f.outcome(lock), CommandOutcome::Applied { .. }));
     let id = f.apply();
-    let jobs = [f.job(), f.job(), f.job()];
+    let jobs = [f.job(), f.job(), f.job(), f.job()];
     assert_eq!(jobs[0].1, a.id);
     assert_eq!(jobs[0].2, vec![DeviceSetting::LowImpedance(true)]);
     assert_eq!(jobs[1].1, b.id);
     assert_eq!(jobs[1].2, vec![DeviceSetting::GainRaw(768)]);
     assert_eq!(jobs[2].1, c.id);
     assert_eq!(jobs[2].2, vec![DeviceSetting::HeadphoneDb(-15.0)]);
+    assert_eq!(jobs[3].1, d.id);
+    assert_eq!(jobs[3].2, vec![DeviceSetting::LowImpedance(true)]);
     for job in &jobs {
         f.finish_job(job, false);
     }
@@ -446,7 +453,7 @@ fn exact_matching_selected_gain_lock_and_profile_limits_do_not_substitute_or_wri
             .iter()
             .any(|issue| issue.target == "hardware wave_xlr:missing")
     );
-    assert_eq!(skipped.len(), 6);
+    assert_eq!(skipped.len(), 9);
 }
 
 #[test]

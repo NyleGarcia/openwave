@@ -436,9 +436,12 @@ impl Drop for Rig {
 
 pub(crate) fn unit(serial: &str, address: u8, hp_db: f64) -> UnitSnapshot {
     let profile = ProfileId::WaveXlr;
-    let mut state = ConfigBuffer::decode(profile, &vec![0; profile.profile().config_len])
-        .unwrap()
-        .state();
+    let mut state = ConfigBuffer::decode(
+        profile,
+        &vec![0; profile.profile().legacy.unwrap().config_len],
+    )
+    .unwrap()
+    .state();
     state.hp_volume_db = hp_db;
     UnitSnapshot {
         id: UnitId {

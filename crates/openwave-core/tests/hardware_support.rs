@@ -9,7 +9,7 @@ fn only_exact_enabled_vid_pid_pairs_are_admitted() {
         (0x0fd9, 0x007d, Some(ProfileId::WaveXlr)),
         (0x0fd9, 0x00a6, Some(ProfileId::WaveXlrMk2)),
         (0x0fd9, 0x0070, Some(ProfileId::Wave3)),
-        (0x0fd9, 0x00c7, None),
+        (0x0fd9, 0x00c7, Some(ProfileId::XlrDockMk2)),
         (0x0fd9, 0x00b6, None),
         (0x0fd9, 0x9999, None),
         (0x046d, 0x007d, None),
@@ -55,6 +55,7 @@ fn scan_preserves_duplicate_models_and_sorts_physical_locations() {
     assert_eq!(
         scan,
         vec![
+            (ProfileId::XlrDockMk2, 1, 1),
             (ProfileId::WaveXlrMk2, 1, 5),
             (ProfileId::Wave3, 1, 9),
             (ProfileId::WaveXlrMk2, 3, 2),
@@ -65,14 +66,19 @@ fn scan_preserves_duplicate_models_and_sorts_physical_locations() {
 #[test]
 fn persisted_profiles_keep_legacy_identifiers() {
     let profiles: Vec<ProfileId> =
-        serde_json::from_str(r#"["wave_xlr","wave_xlr_mk2","wave3"]"#).unwrap();
+        serde_json::from_str(r#"["wave_xlr","wave_xlr_mk2","wave3","xlr_dock_mk2"]"#).unwrap();
     assert_eq!(
         profiles,
-        [ProfileId::WaveXlr, ProfileId::WaveXlrMk2, ProfileId::Wave3]
+        [
+            ProfileId::WaveXlr,
+            ProfileId::WaveXlrMk2,
+            ProfileId::Wave3,
+            ProfileId::XlrDockMk2
+        ]
     );
     assert_eq!(
         serde_json::to_string(&profiles).unwrap(),
-        r#"["wave_xlr","wave_xlr_mk2","wave3"]"#
+        r#"["wave_xlr","wave_xlr_mk2","wave3","xlr_dock_mk2"]"#
     );
     assert!(serde_json::from_str::<ProfileId>(r#""wave_xlr_mk3""#).is_err());
 }

@@ -42,6 +42,10 @@ fn xlr_patches_preserve_every_reserved_byte_and_decode_signed_headphones() {
         expected[9..11].copy_from_slice(&(-3264_i16).to_le_bytes());
         expected[33] = 0;
         assert_eq!(block.as_bytes(), expected);
+        assert_eq!(
+            block.blocks().collect::<Vec<_>>(),
+            vec![(0, expected.as_slice())]
+        );
         let state = block.state();
         assert_eq!(state.gain_raw, 0x5000);
         assert_eq!(state.hp_volume_db, -12.75);
@@ -86,7 +90,7 @@ fn refused_settings_leave_config_unchanged_and_fail_queue_admission() {
         (ProfileId::WaveXlr, DeviceSetting::MonitorMix(100)),
         (ProfileId::WaveXlrMk2, DeviceSetting::MonitorMix(0)),
     ] {
-        let bytes = vec![0x6a; profile.profile().config_len];
+        let bytes = vec![0x6a; profile.profile().legacy.unwrap().config_len];
         let mut block = ConfigBuffer::decode(profile, &bytes).unwrap();
         assert_eq!(
             validate_setting(profile, setting).unwrap_err().code,
@@ -192,5 +196,138 @@ fn vendor_meters_decode_unsigned_words_and_ignore_reserved_tail() {
                 right: 0xfedc_ba98
             }
         );
+    }
+}
+
+#[test]
+fn dock_requires_all_exact_blocks_and_refuses_legacy_decoders() {
+    for length in 0..=39 {
+        let bytes = vec![0; length];
+        assert_eq!(
+            ConfigBuffer::decode_dock(&bytes, &[0; 2], &[0; 6]).is_ok(),
+            length == 38
+        );
+        assert_eq!(
+            ConfigBuffer::decode_dock(&[0; 38], &bytes, &[0; 6]).is_ok(),
+            length == 2
+        );
+        assert_eq!(
+            ConfigBuffer::decode_dock(&[0; 38], &[0; 2], &bytes).is_ok(),
+            length == 6
+        );
+        assert_eq!(
+            ConfigBuffer::decode(ProfileId::XlrDockMk2, &bytes)
+                .unwrap_err()
+                .code,
+            ErrorCode::Unsupported
+        );
+        assert_eq!(
+            decode_device_info(ProfileId::XlrDockMk2, &bytes)
+                .unwrap_err()
+                .code,
+            ErrorCode::Unsupported
+        );
+        assert_eq!(
+            decode_meters(ProfileId::XlrDockMk2, &bytes)
+                .unwrap_err()
+                .code,
+            ErrorCode::Unsupported
+        );
+    }
+}
+
+#[test]
+fn dock_patches_preserve_reserved_bits_and_every_unrelated_block() {
+    for flags in 0..=u8::MAX {
+        let mut settings = [0xa5; 38];
+        settings[0] = 35;
+        settings[1] = flags;
+        let headphones = [51, flags];
+        let monitor = [100, 0x81, 0x32, 0x43, 0x54, 0x65];
+        let original = ConfigBuffer::decode_dock(&settings, &headphones, &monitor).unwrap();
+        assert_eq!(original.state().muted, flags & 1 != 0);
+        assert_eq!(original.state().phantom, Some(flags & 2 != 0));
+        assert_eq!(original.state().low_impedance, Some(flags & 2 != 0));
+        assert_eq!(original.state().hp_volume_db, -12.75);
+        assert_eq!(original.state().gain_raw, 35);
+        assert_eq!(original.state().monitor_mix, Some(100));
+        assert_eq!(original.state().knob_mode, KnobMode::None);
+        for setting in [
+            DeviceSetting::GainRaw(80),
+            DeviceSetting::Mute(false),
+            DeviceSetting::Mute(true),
+            DeviceSetting::Phantom(false),
+            DeviceSetting::Phantom(true),
+            DeviceSetting::HeadphoneDb(-60.0),
+            DeviceSetting::LowImpedance(false),
+            DeviceSetting::LowImpedance(true),
+            DeviceSetting::MonitorMix(200),
+        ] {
+            let mut expected_settings = settings;
+            let mut expected_headphones = headphones;
+            let mut expected_monitor = monitor;
+            match setting {
+                DeviceSetting::GainRaw(_) => expected_settings[0] = 80,
+                DeviceSetting::Mute(on) => expected_settings[1] = (flags & !1) | u8::from(on),
+                DeviceSetting::Phantom(on) => {
+                    expected_settings[1] = (flags & !2) | (u8::from(on) << 1)
+                }
+                DeviceSetting::HeadphoneDb(_) => expected_headphones[0] = 240,
+                DeviceSetting::LowImpedance(on) => {
+                    expected_headphones[1] = (flags & !2) | (u8::from(on) << 1)
+                }
+                DeviceSetting::MonitorMix(_) => expected_monitor[0] = 200,
+            }
+            let mut patched = original.clone();
+            patched.apply(setting).unwrap();
+            assert_eq!(patched.as_bytes(), expected_settings);
+            assert_eq!(
+                patched.blocks().collect::<Vec<_>>(),
+                vec![
+                    (4, expected_settings.as_slice()),
+                    (5, expected_headphones.as_slice()),
+                    (1, expected_monitor.as_slice())
+                ],
+            );
+        }
+    }
+}
+
+#[test]
+fn dock_bounds_rounding_and_nonfinite_rejection_preserve_observations() {
+    let mut block = ConfigBuffer::decode_dock(&[255; 38], &[255; 2], &[255; 6]).unwrap();
+    assert_eq!(block.state().gain_raw, 255);
+    assert_eq!(block.state().hp_volume_db, -63.75);
+    assert_eq!(block.state().monitor_mix, Some(255));
+    for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        let before = block.clone();
+        assert_eq!(
+            block
+                .apply(DeviceSetting::HeadphoneDb(value))
+                .unwrap_err()
+                .code,
+            ErrorCode::Invalid
+        );
+        assert_eq!(block, before);
+    }
+    for (db, expected) in [
+        (-100.0, -60.0),
+        (-60.0, -60.0),
+        (-59.875, -60.0),
+        (-0.375, -0.5),
+        (-0.125, 0.0),
+        (-0.126, -0.25),
+        (10.0, 0.0),
+    ] {
+        block.apply(DeviceSetting::HeadphoneDb(db)).unwrap();
+        assert_eq!(block.state().hp_volume_db, expected);
+    }
+    for (value, expected) in [(0, 0), (80, 80), (81, 80), (u16::MAX, 80)] {
+        block.apply(DeviceSetting::GainRaw(value)).unwrap();
+        assert_eq!(block.state().gain_raw, expected);
+    }
+    for (value, expected) in [(0, 0), (100, 100), (200, 200), (201, 200), (u16::MAX, 200)] {
+        block.apply(DeviceSetting::MonitorMix(value)).unwrap();
+        assert_eq!(block.state().monitor_mix, Some(expected));
     }
 }

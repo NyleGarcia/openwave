@@ -142,6 +142,7 @@ mod device {
             VendorDevice {
                 unit: unit(),
                 transport: Box::new(MemoryTransport(memory.clone())),
+                usb_info: None,
             },
             memory,
         )
@@ -194,7 +195,7 @@ mod device {
         fixture_lock(&memory).config[15] = 0xa7;
         let mut backend = SyncedDevice {
             vendor,
-            alsa: Box::new(alsa),
+            alsa: Some(Box::new(alsa)),
             mirror: Mirror::default(),
         };
         let state = backend
@@ -273,7 +274,7 @@ mod device {
         let (alsa, shared) = alsa();
         let mut backend = SyncedDevice {
             vendor,
-            alsa: Box::new(alsa),
+            alsa: Some(Box::new(alsa)),
             mirror: Mirror::default(),
         };
         backend.poll().unwrap();
@@ -438,7 +439,7 @@ mod device {
         fixture_lock(&usb).config = config.as_bytes().to_vec();
         let mut device = SyncedDevice {
             vendor,
-            alsa: Box::new(controls),
+            alsa: Some(Box::new(controls)),
             mirror,
         };
         let (observed, errors) = device.poll().unwrap();
