@@ -727,10 +727,7 @@ mod tests {
 
     #[test]
     fn typed_names_split_on_commas() {
-        assert_eq!(
-            typed_names("Omnissa, horizon-protocol"),
-            ["Omnissa", "horizon-protocol"]
-        );
+        assert_eq!(typed_names("Player, player-bin"), ["Player", "player-bin"]);
         assert_eq!(typed_names("  Player  "), ["Player"]);
         assert_eq!(typed_names(" , a,,b , "), ["a", "b"]);
         assert!(typed_names(" , ").is_empty());
